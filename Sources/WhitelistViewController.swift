@@ -7,6 +7,7 @@ class WhitelistViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Whitelist"
+        navigationItem.largeTitleDisplayMode = .never
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .add,
@@ -14,6 +15,11 @@ class WhitelistViewController: UITableViewController {
             action: #selector(addDomain)
         )
         reload()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        navigationController?.setToolbarHidden(true, animated: animated)
     }
 
     private func reload() {

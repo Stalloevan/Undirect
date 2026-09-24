@@ -12,6 +12,27 @@ can add more from the in-app Whitelist screen, or tap "Trust Site" while browsin
 Links you tap yourself are always allowed to navigate normally — only redirects/pop-ups the
 *page* triggers on its own are blocked.
 
+## Features
+
+- **Back / forward navigation** — toolbar buttons at the bottom of the browser screen,
+  enabled/disabled based on `WKWebView`'s actual back-forward list.
+- **Session persistence** — the current page's URL and full `WKWebView` interaction state
+  (scroll position, history, form state) are saved whenever the app backgrounds, and
+  restored on the next launch. This specifically fixes the app "forgetting" what site you
+  were on after iOS purges it from the background under memory pressure (common on an
+  iPhone 13 mini's 4 GB RAM) — without this, a cold relaunch always started over at Home.
+- **Catppuccin (Mocha) theming** — every page gets a best-effort dark recolor toward the
+  [Catppuccin](https://catppuccin.com) palette: the official `--ctp-*` CSS variables are
+  exposed on `:root` for sites/styles that use them, plus a filter-based dark recolor (the
+  same general technique "force dark mode" tools use) with images/video re-inverted so
+  photos don't look like negatives. This can't hit every site's exact original hex values
+  — true pixel-perfect per-site theming is what Catppuccin's own userstyles project does,
+  one stylesheet per site — but it gives a consistent, comfortable dark look everywhere.
+- **Compact header** — no iOS large-title bar; just a standard nav bar, to keep more of
+  the small screen for the page itself.
+- Shared `WKProcessPool` across all web views (main browser + any whitelisted pop-ups) for
+  faster loads and consistent cookies/session state between them.
+
 ## Why not a Safari Extension?
 
 iOS Safari Web Extensions cannot intercept top-level `window.location` redirects the way
