@@ -19,6 +19,14 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.app
 
+      - name: Diagnose Xcode environment
+        run: |
+          { ls /Applications | grep -i xcode || true
+            xcodebuild -version
+            xcodebuild -showsdks
+            xcrun simctl list runtimes || true
+          } 2>&1 | tee diag.log
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
@@ -52,6 +60,10 @@ jobs:
           git config user.email "ci@undirect.local"
           git config user.name "Undirect CI"
           cp "$GITHUB_WORKSPACE/build.log" ./latest-build.log || echo "no log" > ./latest-build.log
+          if [ -f "$GITHUB_WORKSPACE/diag.log" ]; then
+            cat "$GITHUB_WORKSPACE/diag.log" ./latest-build.log > ./combined.log
+            mv ./combined.log ./latest-build.log
+          fi
           git checkout -q -b ci-logs
           git add latest-build.log
           git commit -q -m "ci log $GITHUB_RUN_ID"
