@@ -1,0 +1,3 @@
+*.xcodeproj
+Frameworks/
+build/

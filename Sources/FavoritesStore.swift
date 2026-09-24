@@ -12,6 +12,7 @@ struct FavoriteSite: Codable, Equatable {
 final class FavoritesStore {
 
     static let shared = FavoritesStore()
+    static let didChange = Notification.Name("UndirectFavoritesDidChange")
 
     private let defaultsKey = "com.stalloevan.undirect.favorites"
 
@@ -51,5 +52,18 @@ final class FavoritesStore {
     private func persist(_ items: [FavoriteSite]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
+    }
+
+    func remove(urlString: String) {
+        persist(all().filter { $0.urlString != urlString })
+    }
+
+    func move(from: Int, to: Int) {
+        var items = all()
+        guard items.indices.contains(from), items.indices.contains(to) else { return }
+        let item = items.remove(at: from)
+        items.insert(item, at: to)
+        persist(items)
     }
 }

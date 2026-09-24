@@ -27,6 +27,17 @@ jobs:
             xcrun simctl list runtimes || true
           } 2>&1 | tee diag.log
 
+      - name: Download prebuilt Tor (iCepa/Tor.framework)
+        run: |
+          set -euo pipefail
+          mkdir -p Frameworks
+          curl -fsSL -o tor.zip "https://github.com/iCepa/Tor.framework/releases/download/${TOR_VERSION}/tor-nolzma.xcframework.zip"
+          unzip -q tor.zip -d Frameworks
+          rm tor.zip
+          ls Frameworks
+        env:
+          TOR_VERSION: v409.12.1
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

@@ -3,6 +3,7 @@ import UIKit
 class FavoritesViewController: UITableViewController {
 
     private var favorites: [FavoriteSite] = []
+    var onOpen: ((URL) -> Void)?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -48,7 +49,8 @@ class FavoritesViewController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         guard !favorites.isEmpty, let url = URL(string: favorites[indexPath.row].urlString) else { return }
         // Opening a favorite is just navigation — it does not touch the whitelist.
-        navigationController?.pushViewController(BrowserViewController(startURL: url), animated: true)
+        onOpen?(url)
+        navigationController?.popToRootViewController(animated: true)
     }
 
     override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
