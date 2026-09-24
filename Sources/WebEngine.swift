@@ -30,20 +30,29 @@ enum WebEngine {
         config.userContentController.addUserScript(script)
     }
 
-    /// Best-effort universal dark theme in the Catppuccin Mocha palette
-    /// (https://catppuccin.com/palette). Two layers:
-    /// 1. Exposes the official `--ctp-*` custom properties on `:root` for the
-    ///    (growing) set of sites/userstyles that already key off them.
-    /// 2. A CSS `filter`-based recolor, the same technique general "force dark
-    ///    mode" tools use, tuned toward Catppuccin's hue, with media elements
-    ///    (images/video/canvas) re-inverted so photos don't look like negatives.
-    /// This can't perfectly retheme every site's exact hex values — that would
-    /// need a per-site stylesheet the way Catppuccin's own userstyles project
-    /// does — but it gives a consistent, comfortable dark palette everywhere.
+    /// Best-effort universal dark theme, Catppuccin **Mocha** (the dark flavor —
+    /// https://catppuccin.com/palette). This uses the standard "force dark mode"
+    /// filter technique: `invert(1) hue-rotate(180deg)` applied against a *white*
+    /// pre-invert canvas, which is what reliably makes light pages dark (a white
+    /// background inverts to near-black; light text inverts to light-on-dark
+    /// automatically). Media elements are filtered back to their normal
+    /// appearance so photos/video don't render as negatives.
+    ///
+    /// (An earlier version of this used a light pre-invert background color,
+    /// which produced washed-out, Latte-like — i.e. light — results instead of
+    /// Mocha's dark palette. This version is deliberately based on a white
+    /// canvas so the output is reliably dark.)
+    ///
+    /// This can't hit every site's exact Catppuccin hex values — that needs a
+    /// per-site stylesheet, the way Catppuccin's own userstyles project does —
+    /// but it gives a consistent, comfortably dark look everywhere, and the
+    /// official `--ctp-*` custom properties are exposed on `:root` for sites/
+    /// styles that already key off them.
     private static let catppuccinScript = """
     (function () {
       const css = `
-        :root, ::backdrop {
+        :root {
+          color-scheme: dark;
           --ctp-rosewater:#f5e0dc; --ctp-flamingo:#f2cdcd; --ctp-pink:#f5c2e7;
           --ctp-mauve:#cba6f7; --ctp-red:#f38ba8; --ctp-maroon:#eba0ac;
           --ctp-peach:#fab387; --ctp-yellow:#f9e2af; --ctp-green:#a6e3a1;
@@ -53,21 +62,18 @@ enum WebEngine {
           --ctp-overlay1:#7f849c; --ctp-overlay0:#6c7086; --ctp-surface2:#585b70;
           --ctp-surface1:#45475a; --ctp-surface0:#313244; --ctp-base:#1e1e2e;
           --ctp-mantle:#181825; --ctp-crust:#11111b;
-          color-scheme: dark;
         }
         html {
-          filter: invert(1) hue-rotate(180deg) brightness(0.94) contrast(0.92) !important;
-          background: #f5e0dc !important;
+          filter: invert(1) hue-rotate(180deg) !important;
+          background: #ffffff !important;
         }
-        img, picture, video, iframe, canvas, svg, [style*="background-image"],
-        embed, object {
+        img, picture, video, canvas, svg, iframe, embed, object,
+        [style*="background-image"] {
           filter: invert(1) hue-rotate(180deg) !important;
         }
-        ::selection { background: var(--ctp-mauve); color: var(--ctp-base); }
-        ::-webkit-scrollbar { background: var(--ctp-base); }
-        ::-webkit-scrollbar-thumb { background: var(--ctp-surface2); border-radius: 6px; }
       `;
       function inject() {
+        if (document.getElementById("undirect-catppuccin")) return;
         const style = document.createElement("style");
         style.id = "undirect-catppuccin";
         style.textContent = css;

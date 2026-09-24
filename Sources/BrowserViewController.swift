@@ -18,9 +18,22 @@ class BrowserViewController: UIViewController {
     /// Restored scroll/back-forward-history state from a previous session, if any.
     private let restoreInteractionState: Any?
 
+    /// All controls live in the bottom toolbar; the nav bar only shows the title
+    /// and the standard back button.
     private let backButton = UIBarButtonItem(image: UIImage(systemName: "chevron.left"), style: .plain, target: nil, action: nil)
     private let forwardButton = UIBarButtonItem(image: UIImage(systemName: "chevron.right"), style: .plain, target: nil, action: nil)
-    private let trustButton = UIBarButtonItem(title: "Trust Site", style: .plain, target: nil, action: nil)
+    private let favoriteButton = UIBarButtonItem(image: UIImage(systemName: "star"), style: .plain, target: nil, action: nil)
+    private let trustButton = UIBarButtonItem(image: UIImage(systemName: "checkmark.shield"), style: .plain, target: nil, action: nil)
+
+    /// Timestamp of the most recent real tap/touch the person made on the page.
+    /// Used to let a redirect chain that genuinely started from a tap keep
+    /// running (many sites use JS `onclick` handlers rather than real `<a>`
+    /// navigation, which WKWebView reports as navigationType `.other`, not
+    /// `.linkActivated` — indistinguishable from a script-driven redirect
+    /// without this signal).
+    private var lastUserGestureAt: Date?
+    private let gestureGraceInterval: TimeInterval = 2.0
+    private let gestureHandler = GestureMessageProxy()
 
     /// The host of the page currently considered "current" for comparing redirect destinations.
     private var currentHost: String? {
@@ -32,6 +45,7 @@ class BrowserViewController: UIViewController {
         self.isHostingSystemProvidedPopup = configuration != nil
         self.restoreInteractionState = restoreInteractionState
         super.init(nibName: nil, bundle: nil)
+        gestureHandler.owner = self
         setupWebView(configuration: configuration)
     }
 
@@ -39,18 +53,26 @@ class BrowserViewController: UIViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "undirectGesture")
     }
 
     private func setupWebView(configuration: WKWebViewConfiguration?) {
         let config: WKWebViewConfiguration
         if let configuration {
             // A system-provided popup configuration must be used as-is; just make
-            // sure our theming script is present on it too.
+            // sure our theming + gesture-tracking scripts are present on it too.
             config = configuration
             WebEngine.installTheming(on: config)
         } else {
             config = WebEngine.makeConfiguration()
         }
+        config.userContentController.add(gestureHandler, name: "undirectGesture")
+        config.userContentController.addUserScript(WKUserScript(
+            source: Self.gestureTrackingScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -61,6 +83,7 @@ class BrowserViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         navigationItem.largeTitleDisplayMode = .never
+        navigationItem.rightBarButtonItem = nil
         title = startURL.host
 
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -92,18 +115,29 @@ class BrowserViewController: UIViewController {
         }
         urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
             self?.title = webView.url?.host ?? self?.startURL.host
+            self?.updateToggleButtons()
         }
 
         backButton.target = self
         backButton.action = #selector(goBack)
         forwardButton.target = self
         forwardButton.action = #selector(goForward)
+        favoriteButton.target = self
+        favoriteButton.action = #selector(toggleFavorite)
         trustButton.target = self
-        trustButton.action = #selector(trustCurrentSite)
+        trustButton.action = #selector(toggleTrust)
 
-        navigationItem.rightBarButtonItem = trustButton
-        toolbarItems = [backButton, .flexibleSpace(), forwardButton]
+        toolbarItems = [
+            backButton,
+            .flexibleSpace(),
+            favoriteButton,
+            .fixedSpace(24),
+            trustButton,
+            .flexibleSpace(),
+            forwardButton
+        ]
         navigationController?.setToolbarHidden(false, animated: false)
+        updateToggleButtons()
 
         if !isHostingSystemProvidedPopup {
             if let restoreInteractionState {
@@ -134,10 +168,40 @@ class BrowserViewController: UIViewController {
     @objc private func goBack() { webView.goBack() }
     @objc private func goForward() { webView.goForward() }
 
-    @objc private func trustCurrentSite() {
+    @objc private func toggleFavorite() {
+        guard let url = webView.url else { return }
+        let wasFavorite = FavoritesStore.shared.isFavorite(url: url)
+        // Favoriting is purely a bookmark — it never touches the whitelist.
+        FavoritesStore.shared.toggle(url: url, title: webView.title ?? url.host ?? url.absoluteString)
+        updateToggleButtons()
+        showToast(wasFavorite ? "Removed from favorites" : "Added to favorites")
+    }
+
+    @objc private func toggleTrust() {
         guard let host = webView.url?.host else { return }
-        WhitelistStore.shared.add(host: host)
-        showToast("Whitelisted \(WhitelistStore.normalize(host))")
+        let normalized = WhitelistStore.normalize(host)
+        if WhitelistStore.shared.isWhitelisted(host: normalized) {
+            WhitelistStore.shared.remove(host: normalized)
+            showToast("Removed \(normalized) from whitelist")
+        } else {
+            WhitelistStore.shared.add(host: normalized)
+            showToast("Whitelisted \(normalized)")
+        }
+        updateToggleButtons()
+    }
+
+    private func updateToggleButtons() {
+        guard let url = webView.url else { return }
+        let isFavorite = FavoritesStore.shared.isFavorite(url: url)
+        favoriteButton.image = UIImage(systemName: isFavorite ? "star.fill" : "star")
+
+        let isTrusted = WhitelistStore.shared.isWhitelisted(host: url.host)
+        trustButton.image = UIImage(systemName: isTrusted ? "checkmark.shield.fill" : "checkmark.shield")
+    }
+
+    /// Called by GestureMessageProxy whenever the page reports a real tap/touch.
+    fileprivate func registerUserGesture() {
+        lastUserGestureAt = Date()
     }
 
     private func showToast(_ message: String) {
@@ -176,6 +240,32 @@ class BrowserViewController: UIViewController {
             }
         }
     }
+
+    /// Listens for real user interaction on the page (not synthetic events) and
+    /// reports it to native code, so genuinely tap-driven navigation chains
+    /// (including sites that route taps through JS instead of real `<a>` links)
+    /// aren't mistaken for unattended redirects.
+    fileprivate static let gestureTrackingScript = """
+    (function () {
+      function ping() {
+        try { window.webkit.messageHandlers.undirectGesture.postMessage(1); } catch (e) {}
+      }
+      document.addEventListener('pointerdown', ping, true);
+      document.addEventListener('touchstart', ping, true);
+      document.addEventListener('click', ping, true);
+    })();
+    """
+}
+
+/// Thin WKScriptMessageHandler that only weakly references its owning
+/// BrowserViewController, so WKUserContentController's strong retain of the
+/// handler can't create a retain cycle.
+private final class GestureMessageProxy: NSObject, WKScriptMessageHandler {
+    weak var owner: BrowserViewController?
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        owner?.registerUserGesture()
+    }
 }
 
 // MARK: - WKNavigationDelegate (blocks unwanted redirects)
@@ -202,7 +292,18 @@ extension BrowserViewController: WKNavigationDelegate {
         let isUserInitiatedLinkTap = navigationAction.navigationType == .linkActivated
         let isHistoryNavigation = navigationAction.navigationType == .backForward
 
-        if isWhitelisted || isUserInitiatedLinkTap || isHistoryNavigation || sameHostAsCurrent || !isMainFrame {
+        // Many sites navigate via JS `onclick` handlers rather than real <a>
+        // taps, which WebKit reports identically to an unattended redirect
+        // (navigationType .other). If the person genuinely tapped the page
+        // very recently, let this navigation — and any further redirect hop
+        // that follows quickly after it — through, extending the grace window
+        // each time so the whole chain resolves, until it goes quiet.
+        let recentGesture = lastUserGestureAt.map { Date().timeIntervalSince($0) < gestureGraceInterval } ?? false
+
+        if isWhitelisted || isUserInitiatedLinkTap || isHistoryNavigation || sameHostAsCurrent || !isMainFrame || recentGesture {
+            if recentGesture {
+                lastUserGestureAt = Date()
+            }
             decisionHandler(.allow)
             return
         }
@@ -230,15 +331,16 @@ extension BrowserViewController: WKUIDelegate {
             return nil
         }
         let normalizedDestination = WhitelistStore.normalize(destinationHost)
+        let recentGesture = lastUserGestureAt.map { Date().timeIntervalSince($0) < gestureGraceInterval } ?? false
 
-        guard WhitelistStore.shared.isWhitelisted(host: normalizedDestination) else {
+        guard WhitelistStore.shared.isWhitelisted(host: normalizedDestination) || recentGesture else {
             showToast("Blocked pop-up to \(normalizedDestination)")
             return nil
         }
 
-        // Whitelisted: honor the pop-up by pushing a proper browser screen that owns
-        // the WKWebView WebKit created for us (required whenever this delegate method
-        // returns a non-nil view).
+        // Whitelisted (or a genuine recent tap): honor the pop-up by pushing a
+        // proper browser screen that owns the WKWebView WebKit created for us
+        // (required whenever this delegate method returns a non-nil view).
         let popupVC = BrowserViewController(startURL: destinationURL, configuration: configuration)
         navigationController?.pushViewController(popupVC, animated: true)
         return popupVC.webView
