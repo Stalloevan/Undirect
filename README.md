@@ -21,13 +21,20 @@ Links you tap yourself are always allowed to navigate normally — only redirect
   restored on the next launch. This specifically fixes the app "forgetting" what site you
   were on after iOS purges it from the background under memory pressure (common on an
   iPhone 13 mini's 4 GB RAM) — without this, a cold relaunch always started over at Home.
-- **Catppuccin (Mocha) theming** — every page gets a best-effort dark recolor toward the
-  [Catppuccin](https://catppuccin.com) palette: the official `--ctp-*` CSS variables are
-  exposed on `:root` for sites/styles that use them, plus a filter-based dark recolor (the
-  same general technique "force dark mode" tools use) with images/video re-inverted so
-  photos don't look like negatives. This can't hit every site's exact original hex values
-  — true pixel-perfect per-site theming is what Catppuccin's own userstyles project does,
-  one stylesheet per site — but it gives a consistent, comfortable dark look everywhere.
+- **Click-through for ad-interstitial layers** — many "redirect" pages are really an
+  invisible tap-catching overlay: your first tap opens an ad/pop-up *and* the overlay
+  removes itself, so the *next* tap at the same spot would reach the real link
+  underneath. Undirect never lets the ad/redirect through, but when a block follows a
+  real recent tap, it resends a synthetic tap at the same coordinates (up to 4 times,
+  stopping as soon as a resend triggers no further block) — so that overlay gets
+  "clicked through" automatically without ever honoring the thing it was trying to do.
+- **Dark theme** — a plain, low-risk dark theme: `color-scheme: dark` (so well-behaved
+  modern sites apply their own proper dark styling) plus safe background/text color
+  defaults for the rest. An earlier version tried to approximate a specific palette
+  (Catppuccin) using the common CSS `filter: invert()` "force dark mode" trick, which
+  forces the whole page into one pixel-inverted composited layer — a known source of
+  WKWebView instability on complex pages, and the likely cause of crashes on tap. This
+  version avoids that entirely.
 - **Compact header** — no iOS large-title bar; just a standard nav bar, to keep more of
   the small screen for the page itself.
 - Shared `WKProcessPool` across all web views (main browser + any whitelisted pop-ups) for

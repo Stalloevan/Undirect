@@ -25,15 +25,31 @@ class BrowserViewController: UIViewController {
     private let favoriteButton = UIBarButtonItem(image: UIImage(systemName: "star"), style: .plain, target: nil, action: nil)
     private let trustButton = UIBarButtonItem(image: UIImage(systemName: "checkmark.shield"), style: .plain, target: nil, action: nil)
 
-    /// Timestamp of the most recent real tap/touch the person made on the page.
-    /// Used to let a redirect chain that genuinely started from a tap keep
-    /// running (many sites use JS `onclick` handlers rather than real `<a>`
-    /// navigation, which WKWebView reports as navigationType `.other`, not
-    /// `.linkActivated` — indistinguishable from a script-driven redirect
-    /// without this signal).
-    private var lastUserGestureAt: Date?
-    private let gestureGraceInterval: TimeInterval = 2.0
+    /// A pop-up web view's configuration frequently shares its underlying
+    /// WKUserContentController with its opener, so registering a script message
+    /// handler under a fixed name can crash the app the moment a page opens a
+    /// pop-up ("attempting to add script handler with name X that already has
+    /// been added"). A per-instance unique name makes that collision
+    /// impossible regardless of whether the controller is shared.
+    private let gestureMessageName = "undirectGesture_\(UUID().uuidString.prefix(8))"
     private let gestureHandler = GestureMessageProxy()
+
+    /// Where and when the person most recently tapped the page.
+    private var lastTapPoint: CGPoint?
+    private var lastTapAt: Date?
+
+    /// Many "redirect" pages are really an invisible tap-catching overlay: the
+    /// first tap opens an ad/redirect *and* the overlay removes itself, so the
+    /// *next* tap at the same spot reaches the real link underneath. So instead
+    /// of ever letting a blocked navigation through, we keep the block and
+    /// resend a synthetic tap at the same coordinates, repeating (bounded)
+    /// until a resend doesn't trigger another blocked attempt — which
+    /// effectively "clicks through" that layer without ever honoring the
+    /// redirect/pop-up itself.
+    private var retryChainCount = 0
+    private let maxRetryChain = 4
+    private let tapAssociationWindow: TimeInterval = 0.6
+    private let retryRedispatchDelay: TimeInterval = 0.18
 
     /// The host of the page currently considered "current" for comparing redirect destinations.
     private var currentHost: String? {
@@ -53,22 +69,22 @@ class BrowserViewController: UIViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "undirectGesture")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: gestureMessageName)
     }
 
     private func setupWebView(configuration: WKWebViewConfiguration?) {
         let config: WKWebViewConfiguration
         if let configuration {
             // A system-provided popup configuration must be used as-is; just make
-            // sure our theming + gesture-tracking scripts are present on it too.
+            // sure our theming script is present on it too.
             config = configuration
             WebEngine.installTheming(on: config)
         } else {
             config = WebEngine.makeConfiguration()
         }
-        config.userContentController.add(gestureHandler, name: "undirectGesture")
+        config.userContentController.add(gestureHandler, name: gestureMessageName)
         config.userContentController.addUserScript(WKUserScript(
-            source: Self.gestureTrackingScript,
+            source: Self.gestureTrackingScript(messageName: gestureMessageName),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
@@ -77,6 +93,7 @@ class BrowserViewController: UIViewController {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
+        webView.overrideUserInterfaceStyle = .dark
     }
 
     override func viewDidLoad() {
@@ -200,8 +217,30 @@ class BrowserViewController: UIViewController {
     }
 
     /// Called by GestureMessageProxy whenever the page reports a real tap/touch.
-    fileprivate func registerUserGesture() {
-        lastUserGestureAt = Date()
+    /// A brand new tap starts a fresh retry chain at that point.
+    fileprivate func registerUserGesture(at point: CGPoint) {
+        lastTapPoint = point
+        lastTapAt = Date()
+        retryChainCount = 0
+    }
+
+    /// Called when a navigation or pop-up was just blocked. If that block
+    /// followed a real, recent tap and we haven't exhausted the retry budget,
+    /// resend a synthetic tap at the same point — this is what "clicks
+    /// through" a disappearing ad-interstitial layer without ever letting the
+    /// redirect/pop-up itself happen.
+    private func attemptClickThroughIfWarranted() {
+        guard let point = lastTapPoint,
+              let tapAt = lastTapAt,
+              Date().timeIntervalSince(tapAt) < tapAssociationWindow,
+              retryChainCount < maxRetryChain else {
+            return
+        }
+        retryChainCount += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryRedispatchDelay) { [weak self] in
+            guard let self, let webView = self.webView else { return }
+            webView.evaluateJavaScript(Self.syntheticClickScript(x: point.x, y: point.y), completionHandler: nil)
+        }
     }
 
     private func showToast(_ message: String) {
@@ -241,20 +280,43 @@ class BrowserViewController: UIViewController {
         }
     }
 
-    /// Listens for real user interaction on the page (not synthetic events) and
-    /// reports it to native code, so genuinely tap-driven navigation chains
-    /// (including sites that route taps through JS instead of real `<a>` links)
-    /// aren't mistaken for unattended redirects.
-    fileprivate static let gestureTrackingScript = """
-    (function () {
-      function ping() {
-        try { window.webkit.messageHandlers.undirectGesture.postMessage(1); } catch (e) {}
-      }
-      document.addEventListener('pointerdown', ping, true);
-      document.addEventListener('touchstart', ping, true);
-      document.addEventListener('click', ping, true);
-    })();
-    """
+    /// Listens for real user interaction on the page (not synthetic events —
+    /// see below) and reports the tap coordinates to native code.
+    fileprivate static func gestureTrackingScript(messageName: String) -> String {
+        """
+        (function () {
+          function send(x, y) {
+            try { window.webkit.messageHandlers.\(messageName).postMessage({x: x, y: y}); } catch (e) {}
+          }
+          document.addEventListener('touchstart', function (e) {
+            var t = e.changedTouches && e.changedTouches[0];
+            if (t) send(t.clientX, t.clientY);
+          }, true);
+          document.addEventListener('click', function (e) {
+            send(e.clientX, e.clientY);
+          }, true);
+        })();
+        """
+    }
+
+    /// Re-dispatches a realistic tap at (x, y) in the page, aimed at whatever
+    /// element is there *now* — after a blocked overlay has typically already
+    /// removed itself — so the real content underneath receives it.
+    fileprivate static func syntheticClickScript(x: CGFloat, y: CGFloat) -> String {
+        """
+        (function () {
+          var el = document.elementFromPoint(\(x), \(y));
+          if (!el) return;
+          var opts = { bubbles: true, cancelable: true, clientX: \(x), clientY: \(y), view: window };
+          ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (type) {
+            try {
+              var ctor = type.indexOf('pointer') === 0 ? PointerEvent : MouseEvent;
+              el.dispatchEvent(new ctor(type, opts));
+            } catch (e) {}
+          });
+        })();
+        """
+    }
 }
 
 /// Thin WKScriptMessageHandler that only weakly references its owning
@@ -264,7 +326,10 @@ private final class GestureMessageProxy: NSObject, WKScriptMessageHandler {
     weak var owner: BrowserViewController?
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        owner?.registerUserGesture()
+        guard let body = message.body as? [String: Any],
+              let x = body["x"] as? Double,
+              let y = body["y"] as? Double else { return }
+        owner?.registerUserGesture(at: CGPoint(x: x, y: y))
     }
 }
 
@@ -292,27 +357,17 @@ extension BrowserViewController: WKNavigationDelegate {
         let isUserInitiatedLinkTap = navigationAction.navigationType == .linkActivated
         let isHistoryNavigation = navigationAction.navigationType == .backForward
 
-        // Many sites navigate via JS `onclick` handlers rather than real <a>
-        // taps, which WebKit reports identically to an unattended redirect
-        // (navigationType .other). If the person genuinely tapped the page
-        // very recently, let this navigation — and any further redirect hop
-        // that follows quickly after it — through, extending the grace window
-        // each time so the whole chain resolves, until it goes quiet.
-        let recentGesture = lastUserGestureAt.map { Date().timeIntervalSince($0) < gestureGraceInterval } ?? false
-
-        if isWhitelisted || isUserInitiatedLinkTap || isHistoryNavigation || sameHostAsCurrent || !isMainFrame || recentGesture {
-            if recentGesture {
-                lastUserGestureAt = Date()
-            }
+        if isWhitelisted || isUserInitiatedLinkTap || isHistoryNavigation || sameHostAsCurrent || !isMainFrame {
             decisionHandler(.allow)
             return
         }
 
         // Main-frame navigation to a different, non-whitelisted domain that the person
-        // did not directly tap (navigationType .other/.formSubmitted/.reload etc, i.e. a
-        // script- or server-driven redirect) — this is exactly the behavior we block.
+        // did not directly tap — this is exactly the behavior we block, always, with
+        // no exception for a recent tap. If it followed one, click through it instead.
         decisionHandler(.cancel)
         showToast("Blocked redirect to \(normalizedDestination)")
+        attemptClickThroughIfWarranted()
     }
 }
 
@@ -331,16 +386,16 @@ extension BrowserViewController: WKUIDelegate {
             return nil
         }
         let normalizedDestination = WhitelistStore.normalize(destinationHost)
-        let recentGesture = lastUserGestureAt.map { Date().timeIntervalSince($0) < gestureGraceInterval } ?? false
 
-        guard WhitelistStore.shared.isWhitelisted(host: normalizedDestination) || recentGesture else {
+        guard WhitelistStore.shared.isWhitelisted(host: normalizedDestination) else {
             showToast("Blocked pop-up to \(normalizedDestination)")
+            attemptClickThroughIfWarranted()
             return nil
         }
 
-        // Whitelisted (or a genuine recent tap): honor the pop-up by pushing a
-        // proper browser screen that owns the WKWebView WebKit created for us
-        // (required whenever this delegate method returns a non-nil view).
+        // Whitelisted: honor the pop-up by pushing a proper browser screen that owns
+        // the WKWebView WebKit created for us (required whenever this delegate method
+        // returns a non-nil view).
         let popupVC = BrowserViewController(startURL: destinationURL, configuration: configuration)
         navigationController?.pushViewController(popupVC, animated: true)
         return popupVC.webView
