@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
@@ -23,8 +26,10 @@ jobs:
         run: xcodegen generate
 
       - name: Build unsigned .app for iOS device
+        id: build
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -o pipefail
           xcodebuild \
             -project Undirect.xcodeproj \
             -scheme Undirect \
@@ -34,7 +39,29 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee build.log
+
+      - name: Publish build log for debugging
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/logpush
+          cd /tmp/logpush
+          git init -q
+          git config user.email "ci@undirect.local"
+          git config user.name "Undirect CI"
+          cp "$GITHUB_WORKSPACE/build.log" ./latest-build.log || echo "no log" > ./latest-build.log
+          git checkout -q -b ci-logs
+          git add latest-build.log
+          git commit -q -m "ci log $GITHUB_RUN_ID"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q -f origin ci-logs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail job if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
 
       - name: Package IPA (unsigned)
         run: |
