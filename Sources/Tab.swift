@@ -7,6 +7,10 @@ protocol TabDelegate: AnyObject {
     func tab(_ tab: Tab, openInNewTab url: URL)
     func tab(_ tab: Tab, openInBackgroundTab url: URL)
     func tab(_ tab: Tab, share url: URL)
+    /// .onion addresses only resolve inside Tor.
+    func tab(_ tab: Tab, openInTorTab url: URL)
+    /// A pop-up was blocked; the container offers a one-tap override.
+    func tab(_ tab: Tab, blockedPopupTo url: URL)
     func tab(_ tab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView?
     func tabDidRequestClose(_ tab: Tab)
     func tab(_ tab: Tab, didPick selector: String, label: String)
@@ -24,7 +28,15 @@ final class Tab: NSObject {
     weak var delegate: TabDelegate?
 
     private(set) var pendingURL: URL?
+    /// Last real page URL, kept so a crashed web content process (which
+    /// clears webView.url) can be restored instead of reloading nothing.
+    private var lastKnownURL: URL?
     var favicon: UIImage?
+    /// The page's own background color, sampled after load. Drives the
+    /// address bar's tinted gradient and the overscroll ("rubber-band")
+    /// area, so pulling past the page edge continues the page's color
+    /// instead of showing a blank strip.
+    private(set) var pageBackgroundColor: UIColor?
 
     // Snapshots of visited pages, for the interactive swipe-back/forward
     // transition to show while dragging (the destination page hasn't loaded
@@ -153,6 +165,8 @@ final class Tab: NSObject {
     /// there's no more history to go back to.
     func resetToBlank() {
         expectedURL = nil
+        lastKnownURL = nil
+        pageBackgroundColor = nil
         pendingURL = nil
         webView.stopLoading()
         webView.load(URLRequest(url: URL(string: "about:blank")!))
@@ -307,6 +321,15 @@ extension Tab: WKNavigationDelegate {
         guard isMainFrame else { decisionHandler(.allow); return }
 
         let destHost = url.host ?? ""
+
+        if !isTor && destHost.lowercased().hasSuffix(".onion") {
+            // A normal tab can't reach .onion addresses at all (that's the
+            // "bad URL" failure) — hand it to a Tor tab instead.
+            decisionHandler(.cancel)
+            AppLog.shared.log("Routing \(destHost) to a Tor tab", category: "tor")
+            delegate?.tab(self, openInTorTab: url)
+            return
+        }
         let currentHost = webView.url?.host
         let type = action.navigationType
 
@@ -369,28 +392,82 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         userChainActive = false
+        if let url = webView.url, url.scheme == "http" || url.scheme == "https" { lastKnownURL = url }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         userChainActive = false
-        AppLog.shared.log("Provisional navigation failed for \(webView.url?.absoluteString ?? "?"): \(error.localizedDescription)", category: "nav")
+        logNavigationError(error, stage: "Provisional navigation")
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         userChainActive = false
-        AppLog.shared.log("Navigation failed for \(webView.url?.absoluteString ?? "?"): \(error.localizedDescription)", category: "nav")
+        logNavigationError(error, stage: "Navigation")
+    }
+
+    private func logNavigationError(_ error: Error, stage: String) {
+        let nsError = error as NSError
+        // -999 is just "cancelled" — routine whenever a load is superseded
+        // (including our own tracker-stripping reload), not a real failure.
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
+        let failing = (nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
+            ?? webView.url?.absoluteString ?? lastKnownURL?.absoluteString ?? "?"
+        AppLog.shared.log("\(stage) failed (\(isTor ? "Tor" : "normal") tab) for \(failing): \(nsError.localizedDescription) [\(nsError.domain) \(nsError.code)]", category: "nav")
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         CookieGuard.shared.spoofAnalyticsCookies(in: webView.configuration.websiteDataStore.httpCookieStore)
         loadFavicon()
         captureHistorySnapshot()
+        samplePageBackground()
+        // Many pages set their final background after first paint.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.samplePageBackground() }
         delegate?.tabDidChange(self)
     }
 
+    private func samplePageBackground() {
+        let js = """
+        (function () {
+          function bg(el) {
+            if (!el) return null;
+            var c = getComputedStyle(el).backgroundColor;
+            if (!c || c === 'transparent') return null;
+            var p = c.replace(/[^0-9.,]/g, '').split(',').map(function (x) { return parseFloat(x); });
+            if (p.length < 3 || isNaN(p[0])) return null;
+            if (p.length === 4 && p[3] < 0.5) return null;
+            return [p[0], p[1], p[2]];
+          }
+          return bg(document.body) || bg(document.documentElement) || null;
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] value, _ in
+            guard let self else { return }
+            var color: UIColor?
+            if let parts = value as? [NSNumber], parts.count == 3 {
+                color = UIColor(red: CGFloat(parts[0].doubleValue) / 255,
+                                green: CGFloat(parts[1].doubleValue) / 255,
+                                blue: CGFloat(parts[2].doubleValue) / 255, alpha: 1)
+            }
+            let resolved = color ?? Theme.background
+            self.pageBackgroundColor = color
+            self.webView.underPageBackgroundColor = resolved
+            self.webView.backgroundColor = resolved
+            self.webView.scrollView.backgroundColor = resolved
+            self.delegate?.tabDidChange(self)
+        }
+    }
+
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        AppLog.shared.log("Web content process terminated for \(webView.url?.absoluteString ?? "?") — reloading", category: "nav")
-        webView.reload()
+        // iOS kills a tab's web content process under memory pressure (or on
+        // a WebKit crash); webView.url is often already nil by now, so fall
+        // back to the last page we saw.
+        let target = webView.url ?? lastKnownURL
+        AppLog.shared.log("Web content process terminated (\(isTor ? "Tor" : "normal") tab) for \(target?.absoluteString ?? "blank tab") — restoring", category: "nav")
+        if webView.url != nil {
+            webView.reload()
+        } else if let target {
+            load(target)
+        }
     }
 
     /// A cached snapshot of `url`, if this tab has visited it before — used
@@ -497,14 +574,20 @@ extension Tab: WKUIDelegate {
             return delegate?.tab(self, createPopupWith: configuration, url: url)
         }
 
+        if destHost.lowercased().hasSuffix(".onion") && action.navigationType == .linkActivated {
+            AppLog.shared.log("Opening tapped .onion link \(destHost) in a Tor tab", category: "tor")
+            delegate?.tab(self, openInTorTab: url)
+            return nil
+        }
+
         // Every other new-window request is blocked outright — window.open(),
         // target="_blank", a form submitting to a new window, all of it —
-        // with no exception for a click/tap trigger, since that's exactly
-        // the technique disguised ad popups use. A person who wants to
-        // deliberately open a link in a new tab has that as an explicit
-        // action in the link's own long-press menu, which never reaches
-        // this delegate method at all.
-        block(.popups, host: destHost)
+        // with no automatic exception for a click/tap trigger, since that's
+        // exactly the technique disguised ad popups use. The container shows
+        // a tappable notice so a person can still open it deliberately.
+        BlockStats.shared.increment(.popups)
+        AppLog.shared.log("Blocked pop-up to \(destHost) from \(webView.url?.absoluteString ?? "?")", category: "block")
+        delegate?.tab(self, blockedPopupTo: url)
         return nil
     }
 

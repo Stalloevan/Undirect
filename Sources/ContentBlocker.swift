@@ -201,15 +201,14 @@ final class ContentBlocker {
     /// can't see) such as the decoy `ads.js` / `pagead.js` ad-blocker test
     /// pages serve from themselves specifically to check for this.
     private static func scriptPatternJSON() -> String {
-        var s = "["
-        var first = true
-        for pattern in blockedScriptPatterns {
-            if !first { s += "," }
-            first = false
-            s += "{\"trigger\":{\"url-filter\":\"\(pattern)\"},\"action\":{\"type\":\"block\"}}"
+        // Built with a real JSON encoder: the patterns contain regex escapes
+        // like `\.`, which aren't valid JSON escapes if pasted in raw — that
+        // made WebKit reject this whole list (WKErrorDomain 6) before.
+        let rules: [[String: Any]] = blockedScriptPatterns.map { pattern in
+            ["trigger": ["url-filter": pattern], "action": ["type": "block"]]
         }
-        s += "]"
-        return s
+        let data = (try? JSONSerialization.data(withJSONObject: rules)) ?? Data("[]".utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func thirdPartyCookieJSON() -> String {

@@ -32,7 +32,10 @@ final class BrowserContainerViewController: UIViewController {
     private lazy var pageMenuButton = UIButton(type: .system)
     private let progressView = UIProgressView(progressViewStyle: .bar)
     private let sidebar = TabSidebarView()
-    private let sidebarBackdrop = UIView()
+    /// Solid black strip behind the status bar / notch so system icons
+    /// always sit on black with white glyphs, whatever the page or theme.
+    private let statusBarShield = UIView()
+    private let addressGradient = CAGradientLayer()
     private var sidebarWidth: NSLayoutConstraint!
     private let pulloutHandle = PulloutHandleView()
     private var pulloutLeading: NSLayoutConstraint!
@@ -99,6 +102,37 @@ final class BrowserContainerViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         Theme.applyBlockShadow(to: fieldBackground)
+        // Gradient reaches a little above the bar so the page fades into it.
+        let fade: CGFloat = 28
+        addressGradient.frame = CGRect(x: 0, y: -fade, width: addressBar.bounds.width, height: addressBar.bounds.height + fade)
+        applyBottomInsets()
+    }
+
+    /// Bottom space the floating address bar covers, so page content (and
+    /// the new tab page) can still scroll fully clear of it.
+    private var floatingBarCoverage: CGFloat { 50 + view.safeAreaInsets.bottom }
+
+    private func applyBottomInsets() {
+        let inset = floatingBarCoverage
+        if let scroll = currentTab?.webView.scrollView, scroll.contentInset.bottom != inset {
+            scroll.contentInset.bottom = inset
+            scroll.verticalScrollIndicatorInsets.bottom = inset
+        }
+        let ntpInset = UIEdgeInsets(top: 0, left: 0, bottom: 50, right: 0)
+        if ntp.additionalSafeAreaInsets != ntpInset { ntp.additionalSafeAreaInsets = ntpInset }
+    }
+
+    /// Tints the floating bar with the current page's own background color
+    /// (Safari-style), fading from transparent above into solid at the bottom.
+    private func updateAddressBarTint(for tab: Tab) {
+        let color = tab.isBlank ? Theme.background : (tab.pageBackgroundColor ?? Theme.background)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        addressGradient.colors = [color.withAlphaComponent(0).cgColor,
+                                  color.withAlphaComponent(0.92).cgColor,
+                                  color.cgColor]
+        CATransaction.commit()
+        addressBarBackdrop.backgroundColor = color
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -113,13 +147,18 @@ final class BrowserContainerViewController: UIViewController {
         navigationController?.setNavigationBarHidden(false, animated: animated)
     }
 
-    override var preferredStatusBarStyle: UIStatusBarStyle { Theme.statusBarStyle }
+    // Always white: the status bar always sits on the black shield.
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
     // MARK: Layout
 
     private func buildChrome() {
-        addressBar.backgroundColor = Theme.bar
-        addressBarBackdrop.backgroundColor = Theme.bar
+        addressBar.backgroundColor = .clear
+        addressGradient.startPoint = CGPoint(x: 0.5, y: 0)
+        addressGradient.endPoint = CGPoint(x: 0.5, y: 1)
+        addressGradient.locations = [0, 0.45, 1]
+        addressBar.layer.insertSublayer(addressGradient, at: 0)
+        addressBarBackdrop.backgroundColor = Theme.background
         fieldBackground.backgroundColor = Theme.field
         fieldBackground.layer.cornerRadius = Theme.cornerRadius
 
@@ -134,7 +173,6 @@ final class BrowserContainerViewController: UIViewController {
         addressField.returnKeyType = .go
         addressField.autocapitalizationType = .none
         addressField.autocorrectionType = .no
-        addressField.clearButtonMode = .whileEditing
         addressField.keyboardAppearance = Theme.keyboardAppearance
         addressField.delegate = self
 
@@ -153,12 +191,12 @@ final class BrowserContainerViewController: UIViewController {
         progressView.trackTintColor = .clear
 
         sidebar.delegate = self
-        sidebarBackdrop.backgroundColor = Theme.bar
+        statusBarShield.backgroundColor = .black
 
         contentView.backgroundColor = Theme.background
         contentView.clipsToBounds = true
 
-        for v in [contentView, sidebarBackdrop, sidebar, addressBarBackdrop, addressBar, progressView, pickerBanner, pulloutHandle] as [UIView] {
+        for v in [contentView, sidebar, addressBarBackdrop, addressBar, progressView, pickerBanner, pulloutHandle, statusBarShield] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
@@ -228,13 +266,15 @@ final class BrowserContainerViewController: UIViewController {
             sidebar.topAnchor.constraint(equalTo: safe.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: addressBar.topAnchor),
 
-            sidebarBackdrop.topAnchor.constraint(equalTo: view.topAnchor),
-            sidebarBackdrop.bottomAnchor.constraint(equalTo: sidebar.topAnchor),
-            sidebarBackdrop.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
-            sidebarBackdrop.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            statusBarShield.topAnchor.constraint(equalTo: view.topAnchor),
+            statusBarShield.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            statusBarShield.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            statusBarShield.bottomAnchor.constraint(equalTo: safe.topAnchor),
 
-            contentView.topAnchor.constraint(equalTo: view.topAnchor),
-            contentView.bottomAnchor.constraint(equalTo: addressBar.topAnchor),
+            // Page content runs all the way down behind the floating address
+            // bar (it's inset at the bottom so nothing is hidden), like Safari.
+            contentView.topAnchor.constraint(equalTo: safe.topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             pickerBanner.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
             pickerBanner.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
@@ -489,7 +529,8 @@ final class BrowserContainerViewController: UIViewController {
 
     @discardableResult
     func openTab(url: URL?, tor: Bool? = nil, select: Bool = true) -> Tab {
-        let tab = makeTab(tor: tor ?? Settings.shared.torForNewTabs)
+        let isOnion = url?.host?.lowercased().hasSuffix(".onion") ?? false
+        let tab = makeTab(tor: isOnion || (tor ?? Settings.shared.torForNewTabs))
         let insertAt = min(selectedIndex + 1, tabs.count)
         tabs.insert(tab, at: insertAt)
         if let url { tab.load(url) }
@@ -591,8 +632,18 @@ final class BrowserContainerViewController: UIViewController {
             addressIcon.image = Theme.icon("magnifyingglass")
             addressIcon.tintColor = Theme.secondaryText
         }
-        reloadButton.setImage(Theme.icon(tab.webView.isLoading ? "xmark" : "arrow.clockwise"), for: .normal)
-        reloadButton.isHidden = tab.url == nil
+        if addressField.isFirstResponder {
+            // While typing, this slot clears the field (stop-loading glyph).
+            reloadButton.setImage(Theme.icon("xmark"), for: .normal)
+            reloadButton.isHidden = (addressField.text ?? "").isEmpty
+            reloadButton.accessibilityLabel = "Clear"
+        } else {
+            reloadButton.setImage(Theme.icon(tab.webView.isLoading ? "xmark" : "arrow.clockwise"), for: .normal)
+            reloadButton.isHidden = tab.url == nil
+            reloadButton.accessibilityLabel = tab.webView.isLoading ? "Stop" : "Reload"
+        }
+        updateAddressBarTint(for: tab)
+        applyBottomInsets()
 
         let progress = Float(tab.webView.estimatedProgress)
         progressView.setProgress(progress, animated: progress > progressView.progress)
@@ -661,6 +712,11 @@ final class BrowserContainerViewController: UIViewController {
     // MARK: Address bar actions
 
     private func reloadOrStop() {
+        if addressField.isFirstResponder {
+            addressField.text = ""
+            updateChrome()
+            return
+        }
         guard let wv = currentTab?.webView else { return }
         if wv.isLoading { wv.stopLoading() } else { wv.reload() }
     }
@@ -716,8 +772,6 @@ final class BrowserContainerViewController: UIViewController {
         }
 
         let appActions: [UIMenuElement] = [
-            UIAction(title: "New Tab", image: Theme.icon("plus.square")) { [weak self] _ in self?.openTab(url: nil, tor: false) },
-            UIAction(title: "New Tor Tab", image: OnionIcon.image(pointSize: 18)) { [weak self] _ in self?.openTab(url: nil, tor: true) },
             UIAction(title: "Settings", image: Theme.icon("gearshape")) { [weak self] _ in
                 let settings = SettingsViewController()
                 settings.onOpenFavorite = { url in self?.navigate(to: url) }
@@ -819,8 +873,15 @@ final class BrowserContainerViewController: UIViewController {
 
     // MARK: Toast
 
-    private func showToast(_ message: String) {
+    private func showToast(_ message: String, action: (() -> Void)? = nil) {
         let label = PaddedLabel()
+        if let action {
+            label.isUserInteractionEnabled = true
+            label.addGestureRecognizer(ToastTapRecognizer(action: {
+                action()
+                label.removeFromSuperview()
+            }))
+        }
         label.text = message
         label.textAlignment = .center
         label.font = .preferredFont(forTextStyle: .footnote)
@@ -839,7 +900,7 @@ final class BrowserContainerViewController: UIViewController {
             label.bottomAnchor.constraint(equalTo: addressBar.topAnchor, constant: -12)
         ])
         UIView.animate(withDuration: 0.2, animations: { label.alpha = 1 }) { _ in
-            UIView.animate(withDuration: 0.25, delay: 1.6, options: [], animations: { label.alpha = 0 }) { _ in
+            UIView.animate(withDuration: 0.25, delay: action == nil ? 1.6 : 3.2, options: [.allowUserInteraction], animations: { label.alpha = 0 }) { _ in
                 label.removeFromSuperview()
             }
         }
@@ -858,6 +919,12 @@ extension BrowserContainerViewController: UITextFieldDelegate {
     func textFieldDidBeginEditing(_ textField: UITextField) {
         textField.text = currentTab?.webView.url?.absoluteString ?? ""
         DispatchQueue.main.async { textField.selectAll(nil) }
+        updateChrome()
+    }
+
+    func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+        DispatchQueue.main.async { [weak self] in self?.updateChrome() }
+        return true
     }
 
     func textFieldDidEndEditing(_ textField: UITextField) {
@@ -918,6 +985,19 @@ extension BrowserContainerViewController: TabDelegate {
     func tab(_ tab: Tab, openInBackgroundTab url: URL) {
         openTab(url: url, tor: tab.isTor, select: false)
         if tab === currentTab { showToast("Opened in background") }
+    }
+
+    func tab(_ tab: Tab, openInTorTab url: URL) {
+        openTab(url: url, tor: true)
+        showToast("Opened in a Tor tab")
+    }
+
+    func tab(_ tab: Tab, blockedPopupTo url: URL) {
+        guard tab === currentTab else { return }
+        let host = DomainUtil.baseDomain(url.host ?? "")
+        showToast("Blocked pop-up to \(host) · Tap to open") { [weak self] in
+            self?.openTab(url: url, tor: tab.isTor)
+        }
     }
 
     func tab(_ tab: Tab, share url: URL) {
@@ -1125,4 +1205,16 @@ final class PickerBanner: UIView {
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
+}
+
+
+/// Tap recognizer that carries its own closure (for tappable toasts).
+final class ToastTapRecognizer: UITapGestureRecognizer {
+    private let handler: () -> Void
+    init(action: @escaping () -> Void) {
+        handler = action
+        super.init(target: nil, action: nil)
+        addTarget(self, action: #selector(fire))
+    }
+    @objc private func fire() { handler() }
 }
