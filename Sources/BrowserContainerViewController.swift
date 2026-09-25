@@ -81,6 +81,7 @@ final class BrowserContainerViewController: UIViewController {
         torOverlay.frame = contentView.bounds
         torOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         contentView.addSubview(torOverlay)
+        torOverlay.onCancel = { [weak self] in self?.cancelTorWaitOnCurrentTab() }
 
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(rulesUpdated), name: ContentBlocker.didUpdate, object: nil)
@@ -678,6 +679,20 @@ final class BrowserContainerViewController: UIViewController {
         showToast(tab.isTor ? "This tab now uses Tor" : "Tor off for this tab")
     }
 
+    /// A tab that's stuck waiting on Tor is never a dead end — this swaps it
+    /// for a plain non-Tor tab loading the same pending URL.
+    private func cancelTorWaitOnCurrentTab() {
+        guard let old = currentTab, old.isWaitingForTor, let index = tabs.firstIndex(where: { $0 === old }) else { return }
+        let url = old.url
+        let tab = makeTab(tor: false)
+        old.webView.stopLoading()
+        old.webView.removeFromSuperview()
+        tabs[index] = tab
+        if let url { tab.load(url) }
+        showCurrentTab()
+        showToast("Loading without Tor")
+    }
+
     /// Actions for the whole page, reached from the ⋯ button in the address bar.
     /// Favorite / trust / hide-element / pause-blocking live on the tab itself
     /// (long-press the tab in the sidebar) instead of here.
@@ -951,6 +966,8 @@ final class TorConnectingView: UIView {
     private let label = UILabel()
     private let progress = UIProgressView(progressViewStyle: .default)
     private let icon = UIImageView(image: OnionIcon.image(pointSize: 44))
+    private let cancelButton = UIButton(type: .system)
+    var onCancel: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -962,7 +979,12 @@ final class TorConnectingView: UIView {
         label.textAlignment = .center
         label.numberOfLines = 0
         progress.progressTintColor = Theme.tor
-        let stack = UIStackView(arrangedSubviews: [icon, label, progress])
+        var buttonConfig = UIButton.Configuration.plain()
+        buttonConfig.title = "Cancel — load without Tor"
+        cancelButton.configuration = buttonConfig
+        cancelButton.tintColor = Theme.secondaryText
+        cancelButton.addAction(UIAction { [weak self] _ in self?.onCancel?() }, for: .touchUpInside)
+        let stack = UIStackView(arrangedSubviews: [icon, label, progress, cancelButton])
         stack.axis = .vertical
         stack.spacing = 14
         stack.alignment = .center
@@ -985,10 +1007,13 @@ final class TorConnectingView: UIView {
         case .starting(let p):
             label.text = "Connecting to Tor…"
             progress.setProgress(Float(p) / 100, animated: true)
+            progress.isHidden = false
         case .failed(let why):
-            label.text = "Tor couldn't connect (\(why)).\nRestart the app to try again."
+            label.text = "Tor couldn't connect (\(why))."
+            progress.isHidden = true
         default:
             label.text = "Connecting to Tor…"
+            progress.isHidden = false
         }
     }
 }

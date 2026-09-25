@@ -110,7 +110,7 @@ final class TorManager {
     }
 
     private func monitorBootstrap() {
-        let deadline = Date().addingTimeInterval(180)
+        let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
             if case .failed = state { return }
             if control == nil { control = connectControl() }
