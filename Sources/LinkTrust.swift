@@ -161,7 +161,7 @@ final class LinkPreviewViewController: UIViewController {
 
         view.setNeedsLayout()
         view.layoutIfNeeded()
-        let height = stack.systemLayoutSizeFitting(CGSize(width: 300, height: .greatestFiniteMagnitude)).height + 28
+        let height = stack.systemLayoutSizeFitting(CGSize(width: 300, height: CGFloat.greatestFiniteMagnitude)).height + 28
         preferredContentSize = CGSize(width: 300, height: height)
 
         if !isTor, let hostName = url.host {
