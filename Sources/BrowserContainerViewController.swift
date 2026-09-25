@@ -29,6 +29,7 @@ final class BrowserContainerViewController: UIViewController {
     private var contentLeadingFromSafe: NSLayoutConstraint!
     private var contentTrailingFromSidebar: NSLayoutConstraint!
     private var contentTrailingFromSafe: NSLayoutConstraint!
+    private var addressBarBottom: NSLayoutConstraint!
 
     private var pickingTab: Tab?
     private var lastAppliedSidebarPosition: SidebarPosition?
@@ -65,6 +66,7 @@ final class BrowserContainerViewController: UIViewController {
         nc.addObserver(self, selector: #selector(elementRulesChanged), name: ElementHideStore.didChange, object: nil)
         nc.addObserver(self, selector: #selector(updateChrome), name: FavoritesStore.didChange, object: nil)
         nc.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
 
         restoreSession()
     }
@@ -138,8 +140,10 @@ final class BrowserContainerViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
+        addressBarBottom = addressBar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        addressBarBottom.isActive = true
+
         NSLayoutConstraint.activate([
-            addressBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             addressBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             addressBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             addressBar.topAnchor.constraint(equalTo: safe.bottomAnchor, constant: -50),
@@ -390,6 +394,26 @@ final class BrowserContainerViewController: UIViewController {
     @objc private func settingsChanged() {
         applySidebarPosition()
         for tab in tabs { tab.reinstallScripts() }
+    }
+
+    /// The address bar is pinned to the bottom of the screen, so without this
+    /// the keyboard would simply cover it while typing. Moves it — and
+    /// everything anchored above it — up to sit right above the keyboard.
+    @objc private func keyboardWillChangeFrame(_ note: Notification) {
+        guard let userInfo = note.userInfo,
+              let endFrameValue = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+        let endFrameInView = view.convert(endFrameValue.cgRectValue, from: nil)
+        let overlap = max(0, view.bounds.maxY - endFrameInView.minY)
+        let bottomInset = view.safeAreaInsets.bottom
+        let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        let curveRaw = (userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt) ?? UIView.AnimationCurve.easeInOut.rawValue
+        let curve = UIView.AnimationCurve(rawValue: Int(curveRaw)) ?? .easeInOut
+
+        addressBarBottom.constant = overlap > 0 ? -(overlap - bottomInset) : 0
+        let animator = UIViewPropertyAnimator(duration: duration, curve: curve) { [weak self] in
+            self?.view.layoutIfNeeded()
+        }
+        animator.startAnimation()
     }
 
     @objc private func torStateChanged() {

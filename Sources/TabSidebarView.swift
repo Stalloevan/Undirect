@@ -45,6 +45,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
     private let currentTabSpinner = UIActivityIndicatorView(style: .medium)
     private let collapsedAddButton = UIButton(type: .system)
     private var currentTabInteraction: UIContextMenuInteraction?
+    private let expandSwipe = UISwipeGestureRecognizer()
 
     private var items: [SidebarItem] = []
     private var rows: [Row] = []
@@ -67,7 +68,9 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         currentTabSpinner.color = Theme.secondaryText
         currentTabSpinner.hidesWhenStopped = true
         currentTabButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidToggleExpanded() }, for: .touchUpInside)
-        currentTabButton.accessibilityLabel = "Current tab — tap to show all tabs"
+        currentTabButton.accessibilityLabel = "Current tab — swipe or tap to show all tabs"
+        currentTabButton.addGestureRecognizer(expandSwipe)
+        expandSwipe.addTarget(self, action: #selector(handleExpandSwipe))
         let interaction = UIContextMenuInteraction(delegate: self)
         currentTabButton.addInteraction(interaction)
         currentTabInteraction = interaction
@@ -132,9 +135,25 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
             divider.trailingAnchor.constraint(equalTo: trailingAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1)
         ])
+
+        refreshSwipeDirection()
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshSwipeDirection), name: Settings.didChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func handleExpandSwipe() {
+        guard !isExpanded else { return }
+        delegate?.sidebarDidToggleExpanded()
+    }
+
+    /// The "swipe out to reveal" direction depends on which edge the bar is
+    /// docked to — swiping away from that edge, toward the content, expands it.
+    @objc private func refreshSwipeDirection() {
+        expandSwipe.direction = Settings.shared.sidebarPosition == .leading ? .right : .left
+    }
 
     private func newTabMenu() -> UIMenu {
         UIMenu(children: [
