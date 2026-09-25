@@ -317,7 +317,6 @@ final class BrowserContainerViewController: UIViewController {
         guard gesture.state == .began, sidebarState != .hidden else { return }
         setSidebarState(.hidden, animated: true)
     }
-    }
 
     // MARK: Tabs
 
