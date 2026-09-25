@@ -211,7 +211,7 @@ private final class FavoriteCell: UICollectionViewCell {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        iconView.layer.cornerRadius = 12
+        iconView.layer.cornerRadius = Theme.smallCornerRadius + 5
         iconView.clipsToBounds = true
         iconView.contentMode = .scaleAspectFill
         iconView.backgroundColor = Theme.surface
@@ -245,7 +245,7 @@ private final class EmptyCell: UICollectionViewCell {
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = Theme.surface
-        contentView.layer.cornerRadius = 14
+        contentView.layer.cornerRadius = Theme.cornerRadius + 3
         label.font = .systemFont(ofSize: 14)
         label.textColor = Theme.secondaryText
         label.textAlignment = .center
@@ -263,7 +263,7 @@ private final class StatsCell: UICollectionViewCell {
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = Theme.surface
-        contentView.layer.cornerRadius = 14
+        contentView.layer.cornerRadius = Theme.cornerRadius + 3
         stack.axis = .vertical
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -337,7 +337,7 @@ private final class TorCell: UICollectionViewCell {
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = Theme.surface
-        contentView.layer.cornerRadius = 14
+        contentView.layer.cornerRadius = Theme.cornerRadius + 3
         status.font = .systemFont(ofSize: 14, weight: .medium)
         status.textColor = Theme.text
         status.numberOfLines = 2

@@ -104,7 +104,7 @@ final class BrowserContainerViewController: UIViewController {
         navigationController?.setNavigationBarHidden(false, animated: animated)
     }
 
-    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+    override var preferredStatusBarStyle: UIStatusBarStyle { Theme.statusBarStyle }
 
     // MARK: Layout
 
@@ -113,7 +113,7 @@ final class BrowserContainerViewController: UIViewController {
         addressBarBackdrop.backgroundColor = Theme.bar
         let fieldBackground = UIView()
         fieldBackground.backgroundColor = Theme.field
-        fieldBackground.layer.cornerRadius = 11
+        fieldBackground.layer.cornerRadius = Theme.cornerRadius
 
         addressIcon.tintColor = Theme.secondaryText
         addressIcon.contentMode = .scaleAspectFit
@@ -127,7 +127,7 @@ final class BrowserContainerViewController: UIViewController {
         addressField.autocapitalizationType = .none
         addressField.autocorrectionType = .no
         addressField.clearButtonMode = .whileEditing
-        addressField.keyboardAppearance = .dark
+        addressField.keyboardAppearance = Theme.keyboardAppearance
         addressField.delegate = self
 
         reloadButton.tintColor = Theme.secondaryText
@@ -763,7 +763,7 @@ final class BrowserContainerViewController: UIViewController {
         label.font = .preferredFont(forTextStyle: .footnote)
         label.textColor = .white
         label.backgroundColor = UIColor.black.withAlphaComponent(0.85)
-        label.layer.cornerRadius = 10
+        label.layer.cornerRadius = Theme.cornerRadius
         label.clipsToBounds = true
         label.numberOfLines = 0
         label.alpha = 0
@@ -958,12 +958,12 @@ final class PulloutHandleView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = Theme.bar
-        layer.cornerRadius = 10
+        layer.cornerRadius = Theme.cornerRadius
 
         iconView.contentMode = .scaleAspectFill
-        iconView.layer.cornerRadius = 7
+        iconView.layer.cornerRadius = Theme.smallCornerRadius
         iconView.clipsToBounds = true
-        ring.layer.cornerRadius = 9
+        ring.layer.cornerRadius = Theme.smallCornerRadius + 2
         ring.layer.borderWidth = 2
         ring.layer.borderColor = Theme.tor.cgColor
         spinner.color = Theme.secondaryText
@@ -1021,7 +1021,7 @@ final class PickerBanner: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = UIColor(red: 0.55, green: 0.18, blue: 0.32, alpha: 0.95)
-        layer.cornerRadius = 12
+        layer.cornerRadius = Theme.cornerRadius
         let label = UILabel()
         label.text = "Tap the element you want to hide"
         label.textColor = .white

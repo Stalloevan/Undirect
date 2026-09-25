@@ -21,6 +21,7 @@ enum WebEngine {
             controller.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart,
                                                   forMainFrameOnly: mainFrameOnly, in: world))
         }
+        add(viewportFallbackScript, mainFrameOnly: false, world: world)
         add(darkThemeScript, mainFrameOnly: false, world: world)
         add(agentScript(messageName: messageName), mainFrameOnly: false, world: world)
         add(pickerScript(messageName: messageName), mainFrameOnly: true, world: world)
@@ -37,6 +38,34 @@ enum WebEngine {
     // MARK: Scripts
 
     /// Plain, low-risk dark theme (no page-wide filters).
+    /// Pages that don't declare their own viewport meta tag fall back to a
+    /// ~980px desktop-width layout and render zoomed out to fit — standard
+    /// mobile-Safari behavior, but not what people expect from a phone
+    /// browser. This adds a sensible `width=device-width` default, but only
+    /// when the page has no viewport tag of its own, so a page's deliberate
+    /// viewport settings (including odd ones like user-scalable=no) are
+    /// never overridden. Watches for <head> directly instead of waiting for
+    /// DOMContentLoaded, since by then the page would already have rendered
+    /// once at the wrong scale.
+    private static let viewportFallbackScript = """
+    (function () {
+      function hasViewport() { return !!document.querySelector('meta[name="viewport" i]'); }
+      function insert(head) {
+        if (hasViewport()) return;
+        var meta = document.createElement('meta');
+        meta.setAttribute('name', 'viewport');
+        meta.setAttribute('content', 'width=device-width, initial-scale=1');
+        head.insertBefore(meta, head.firstChild);
+      }
+      if (document.head) { insert(document.head); return; }
+      var root = document.documentElement || document;
+      var mo = new MutationObserver(function () {
+        if (document.head) { insert(document.head); mo.disconnect(); }
+      });
+      mo.observe(root, { childList: true, subtree: true });
+    })();
+    """
+
     private static let darkThemeScript = """
     (function () {
       var css = ':root{color-scheme:dark}html{background-color:#121217 !important}body{background-color:transparent;color:#dcdce4}';

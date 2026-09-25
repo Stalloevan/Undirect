@@ -179,11 +179,11 @@ private final class TabCell: UITableViewCell {
         backgroundColor = .clear
         selectionStyle = .none
 
-        highlight.layer.cornerRadius = 10
-        iconView.layer.cornerRadius = 7
+        highlight.layer.cornerRadius = Theme.cornerRadius
+        iconView.layer.cornerRadius = Theme.smallCornerRadius
         iconView.clipsToBounds = true
         iconView.contentMode = .scaleAspectFill
-        ring.layer.cornerRadius = 9
+        ring.layer.cornerRadius = Theme.smallCornerRadius + 2
         ring.layer.borderWidth = 2
         ring.layer.borderColor = Theme.tor.cgColor
         titleLabel.font = .systemFont(ofSize: 14, weight: .medium)

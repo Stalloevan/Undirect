@@ -2,15 +2,104 @@ import UIKit
 
 // MARK: - Theme
 
+enum AppTheme: String, CaseIterable {
+    case catppuccin, nord, retro95
+
+    var title: String {
+        switch self {
+        case .catppuccin: return "Catppuccin"
+        case .nord: return "Nord"
+        case .retro95: return "Retro 95"
+        }
+    }
+}
+
+private struct ThemePalette {
+    let background: UIColor
+    let bar: UIColor
+    let surface: UIColor
+    let field: UIColor
+    let accent: UIColor
+    let tor: UIColor
+    let text: UIColor
+    let secondaryText: UIColor
+    let cornerRadius: CGFloat
+    let smallCornerRadius: CGFloat
+    let isDark: Bool
+}
+
+/// Reads live from Settings.shared.appTheme, so every call site (which the
+/// whole app already addresses as plain `Theme.background` etc.) picks up
+/// the current theme automatically. A theme change rebuilds the browser's
+/// view hierarchy from scratch (see SceneDelegate) rather than trying to
+/// live-restyle every already-built view, so these values only need to be
+/// correct at the moment each screen is (re)constructed.
 enum Theme {
-    static let background = UIColor(red: 0.07, green: 0.07, blue: 0.09, alpha: 1)
-    static let bar = UIColor(red: 0.11, green: 0.11, blue: 0.14, alpha: 1)
-    static let surface = UIColor(red: 0.15, green: 0.15, blue: 0.19, alpha: 1)
-    static let field = UIColor(red: 0.19, green: 0.19, blue: 0.24, alpha: 1)
-    static let accent = UIColor(red: 0.80, green: 0.65, blue: 0.97, alpha: 1)
-    static let tor = UIColor(red: 0.62, green: 0.45, blue: 0.95, alpha: 1)
-    static let text = UIColor(white: 0.92, alpha: 1)
-    static let secondaryText = UIColor(white: 0.62, alpha: 1)
+    private static func palette() -> ThemePalette {
+        switch Settings.shared.appTheme {
+        case .catppuccin:
+            return ThemePalette(
+                background: UIColor(red: 0.07, green: 0.07, blue: 0.09, alpha: 1),
+                bar: UIColor(red: 0.11, green: 0.11, blue: 0.14, alpha: 1),
+                surface: UIColor(red: 0.15, green: 0.15, blue: 0.19, alpha: 1),
+                field: UIColor(red: 0.19, green: 0.19, blue: 0.24, alpha: 1),
+                accent: UIColor(red: 0.80, green: 0.65, blue: 0.97, alpha: 1),
+                tor: UIColor(red: 0.62, green: 0.45, blue: 0.95, alpha: 1),
+                text: UIColor(white: 0.92, alpha: 1),
+                secondaryText: UIColor(white: 0.62, alpha: 1),
+                cornerRadius: 11,
+                smallCornerRadius: 7,
+                isDark: true
+            )
+        case .nord:
+            return ThemePalette(
+                background: UIColor(red: 0.098, green: 0.114, blue: 0.145, alpha: 1),
+                bar: UIColor(red: 0.149, green: 0.169, blue: 0.212, alpha: 1),
+                surface: UIColor(red: 0.180, green: 0.204, blue: 0.251, alpha: 1),
+                field: UIColor(red: 0.231, green: 0.259, blue: 0.318, alpha: 1),
+                accent: UIColor(red: 0.533, green: 0.753, blue: 0.816, alpha: 1),
+                tor: UIColor(red: 0.506, green: 0.631, blue: 0.757, alpha: 1),
+                text: UIColor(red: 0.925, green: 0.937, blue: 0.957, alpha: 1),
+                secondaryText: UIColor(red: 0.635, green: 0.663, blue: 0.710, alpha: 1),
+                cornerRadius: 11,
+                smallCornerRadius: 7,
+                isDark: true
+            )
+        case .retro95:
+            // Classic Windows 95/98: silver chrome, navy titlebar blue, white
+            // input fields, black text, square corners everywhere. There's
+            // no true 3D bevel rendering here — that would mean reworking
+            // every custom-drawn control's border code — but the palette and
+            // squared-off corners alone get most of the way to the look.
+            return ThemePalette(
+                background: UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1),
+                bar: UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1),
+                surface: UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1),
+                field: UIColor.white,
+                accent: UIColor(red: 0.0, green: 0.0, blue: 0.502, alpha: 1),
+                tor: UIColor(red: 0.0, green: 0.376, blue: 0.376, alpha: 1),
+                text: UIColor.black,
+                secondaryText: UIColor(white: 0.30, alpha: 1),
+                cornerRadius: 0,
+                smallCornerRadius: 0,
+                isDark: false
+            )
+        }
+    }
+
+    static var background: UIColor { palette().background }
+    static var bar: UIColor { palette().bar }
+    static var surface: UIColor { palette().surface }
+    static var field: UIColor { palette().field }
+    static var accent: UIColor { palette().accent }
+    static var tor: UIColor { palette().tor }
+    static var text: UIColor { palette().text }
+    static var secondaryText: UIColor { palette().secondaryText }
+    static var cornerRadius: CGFloat { palette().cornerRadius }
+    static var smallCornerRadius: CGFloat { palette().smallCornerRadius }
+    static var isDark: Bool { palette().isDark }
+    static var statusBarStyle: UIStatusBarStyle { isDark ? .lightContent : .darkContent }
+    static var keyboardAppearance: UIKeyboardAppearance { isDark ? .dark : .light }
 }
 
 // MARK: - Settings
@@ -127,6 +216,10 @@ final class Settings {
     var preloadFavorites: Bool {
         get { bool("s.preload", true) }
         set { set(newValue, "s.preload") }
+    }
+    var appTheme: AppTheme {
+        get { AppTheme(rawValue: defaults.string(forKey: "s.appTheme") ?? "") ?? .catppuccin }
+        set { set(newValue.rawValue, "s.appTheme") }
     }
     var sidebarState: SidebarState {
         get { SidebarState(rawValue: defaults.string(forKey: "s.sidebarState") ?? "") ?? .minimal }

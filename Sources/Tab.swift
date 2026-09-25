@@ -245,7 +245,11 @@ final class Tab: NSObject {
         BlockStats.shared.increment(kind)
         let what = kind == .popups ? "pop-up" : "redirect"
         delegate?.tab(self, toast: "Blocked \(what) to \(DomainUtil.baseDomain(host))")
-        attemptClickThrough()
+        // Click-through exists for redirect overlays that disappear after a
+        // tap. A pop-up is a persistent link/button, not a vanishing layer —
+        // resending a synthetic click at it can just retrigger the exact
+        // window.open()/target=_blank we intended to block.
+        if kind != .popups { attemptClickThrough() }
     }
 }
 
@@ -454,6 +458,17 @@ extension Tab: WKUIDelegate {
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard let url = action.request.url, let destHost = url.host else { return nil }
+
+        // WebKit normally only calls this delegate method when there's no
+        // existing target frame (a genuine new window). If it ever reports
+        // one anyway — e.g. window.open() aimed at an already-present named
+        // iframe — that's not a pop-up; just navigate it in place instead of
+        // blocking it as one.
+        if let targetFrame = action.targetFrame, !targetFrame.isMainFrame {
+            webView.load(action.request)
+            return nil
+        }
+
         let currentHost = webView.url?.host
         let trusted = WhitelistStore.shared.isWhitelisted(host: destHost)
             || WhitelistStore.shared.isWhitelisted(host: currentHost)
@@ -487,7 +502,10 @@ extension Tab: WKUIDelegate {
             completionHandler(nil)
             return
         }
-        let config = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+        let isTor = self.isTor
+        let config = UIContextMenuConfiguration(identifier: nil, previewProvider: {
+            LinkPreviewViewController(url: url, isTor: isTor)
+        }) { [weak self] _ in
             guard let self else { return nil }
             return UIMenu(children: [
                 UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in

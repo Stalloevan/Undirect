@@ -152,6 +152,9 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Status", kind: .info({ TorManager.shared.state.description }))
             ]),
             SettingsSection(title: "General", footer: nil, rows: [
+                SettingsRow(title: "Theme", kind: .choice(value: { s.appTheme.title }, options: {
+                    AppTheme.allCases.map { theme -> (String, () -> Void) in (theme.title, { s.appTheme = theme }) }
+                })),
                 SettingsRow(title: "Preload favorites on Wi-Fi", kind: .toggle(get: { s.preloadFavorites }, set: { s.preloadFavorites = $0 })),
                 SettingsRow(title: "Tab bar side", kind: .choice(value: { s.sidebarPosition.title }, options: {
                     SidebarPosition.allCases.map { pos -> (String, () -> Void) in (pos.title, { s.sidebarPosition = pos }) }
