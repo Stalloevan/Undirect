@@ -132,7 +132,8 @@ final class SettingsViewController: SettingsTableViewController {
                 })),
                 SettingsRow(title: "Hidden elements", kind: .push({ HiddenElementsViewController() }))
             ]),
-            SettingsSection(title: "Cookies", footer: "Sites where you enter a password are remembered automatically so you stay logged in. Everything else is cleared.", rows: [
+            SettingsSection(title: "Cookies", footer: "Cookie-consent pop-ups are rejected and hidden automatically — turn that off above to see them and choose yourself. Sites where you enter a password are remembered automatically so you stay logged in. Everything else is cleared.", rows: [
+                SettingsRow(title: "Auto-dismiss cookie banners", kind: .toggle(get: { s.autoHandleCookieBanners }, set: { s.autoHandleCookieBanners = $0 })),
                 SettingsRow(title: "Block third-party cookies", kind: .toggle(get: { s.blockThirdPartyCookies }, set: { s.blockThirdPartyCookies = $0; blockingChanged() })),
                 SettingsRow(title: "Spoof analytics cookies", kind: .toggle(get: { s.spoofAnalyticsCookies }, set: { s.spoofAnalyticsCookies = $0 })),
                 SettingsRow(title: "Clear other site data", kind: .choice(value: { s.cookieCleanup.title }, options: {
@@ -152,6 +153,9 @@ final class SettingsViewController: SettingsTableViewController {
             ]),
             SettingsSection(title: "General", footer: nil, rows: [
                 SettingsRow(title: "Preload favorites on Wi-Fi", kind: .toggle(get: { s.preloadFavorites }, set: { s.preloadFavorites = $0 })),
+                SettingsRow(title: "Tab bar side", kind: .choice(value: { s.sidebarPosition.title }, options: {
+                    SidebarPosition.allCases.map { pos -> (String, () -> Void) in (pos.title, { s.sidebarPosition = pos }) }
+                })),
                 SettingsRow(title: "New tab page layout", kind: .push({ NTPLayoutViewController() })),
                 SettingsRow(title: "Favorites", kind: .push({ [weak self] in
                     let vc = FavoritesViewController()

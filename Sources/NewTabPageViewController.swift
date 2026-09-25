@@ -166,7 +166,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
                 UIAction(title: "Open in New Tab", image: UIImage(systemName: "plus.square.on.square")) { _ in
                     self?.onOpen?(url, true, false)
                 },
-                UIAction(title: "Open in Tor Tab", image: UIImage(systemName: "network.badge.shield.half.filled")) { _ in
+                UIAction(title: "Open in Tor Tab", image: OnionIcon.image(pointSize: 18)) { _ in
                     self?.onOpen?(url, true, true)
                 },
                 UIAction(title: "Remove", image: UIImage(systemName: "star.slash"), attributes: .destructive) { _ in
@@ -345,7 +345,7 @@ private final class TorCell: UICollectionViewCell {
         config.title = "New Tor Tab"
         config.baseBackgroundColor = Theme.tor
         config.cornerStyle = .capsule
-        config.image = UIImage(systemName: "network.badge.shield.half.filled")
+        config.image = OnionIcon.image(pointSize: 16)
         config.imagePadding = 6
         button.configuration = config
         button.addAction(UIAction { [weak self] _ in self?.onOpen?() }, for: .touchUpInside)

@@ -55,6 +55,11 @@ enum CookieCleanupMode: String, CaseIterable {
     }
 }
 
+enum SidebarPosition: String, CaseIterable {
+    case leading, trailing
+    var title: String { self == .leading ? "Left" : "Right" }
+}
+
 enum NTPSection: String, CaseIterable, Codable {
     case favorites, stats, tor
 
@@ -122,6 +127,15 @@ final class Settings {
     var sidebarExpanded: Bool {
         get { bool("s.sidebarExpanded", false) }
         set { defaults.set(newValue, forKey: "s.sidebarExpanded") }
+    }
+    var sidebarPosition: SidebarPosition {
+        get { SidebarPosition(rawValue: defaults.string(forKey: "s.sidebarPosition") ?? "") ?? .leading }
+        set { set(newValue.rawValue, "s.sidebarPosition") }
+    }
+    /// Auto-dismisses cookie-consent banners instead of showing them. Off = see them normally.
+    var autoHandleCookieBanners: Bool {
+        get { bool("s.autoConsent", true) }
+        set { set(newValue, "s.autoConsent") }
     }
 
     // New tab page layout

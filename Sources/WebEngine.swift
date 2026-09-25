@@ -25,6 +25,9 @@ enum WebEngine {
         add(agentScript(messageName: messageName), mainFrameOnly: false, world: world)
         add(pickerScript(messageName: messageName), mainFrameOnly: true, world: world)
         add(ElementHideStore.shared.scriptSource(), mainFrameOnly: false, world: world)
+        if Settings.shared.autoHandleCookieBanners {
+            add(consentAutoHandlerScript, mainFrameOnly: false, world: world)
+        }
         if tor {
             // WebRTC can reveal your real IP over UDP, bypassing the Tor proxy.
             add(disableWebRTCScript, mainFrameOnly: false, world: .page)
@@ -46,6 +49,71 @@ enum WebEngine {
       }
       if (document.documentElement) inject();
       else document.addEventListener('DOMContentLoaded', inject, { once: true });
+    })();
+    """
+
+    /// Auto-rejects and hides cookie-consent banners, so you never see one.
+    /// Recognizes the handful of big consent-management platforms (OneTrust,
+    /// Cookiebot, Didomi, Quantcast/IAB TCF, Osano, Termly) plus a generic
+    /// selector list for everything else, and calls each platform's own
+    /// "reject non-essential" API where one exists rather than just hiding
+    /// the banner blind. Turn off in Settings to see banners normally.
+    private static let consentAutoHandlerScript = """
+    (function () {
+      var selectors = [
+        '#onetrust-banner-sdk', '#onetrust-consent-sdk', '.onetrust-pc-dark-filter',
+        '#CybotCookiebotDialog', '#CybotCookiebotDialogBodyUnderlay',
+        '.qc-cmp2-container', '.fc-consent-root', '#sp_message_container',
+        '.didomi-popup-container', '#didomi-host', '.didomi-consent-popup-backdrop',
+        '.osano-cm-window', '.osano-cm-dialog', '.termly-styles-consent-container',
+        '#cookiescript_injected', '.cc-window', '.cc-banner', '#cookie-law-info-bar',
+        '#cookieConsentContainer', '.cookie-consent', '.cookie-banner', '.cookie-notice',
+        '#cookie-notice', '.cookiebar', '#cookiebar', '.truste_box_overlay',
+        '#truste-consent-track', '.tp-modal-overlay', '#gdpr-consent-tool-wrapper',
+        '[class*="cookie-consent" i]', '[id*="cookie-consent" i]', '[class*="cookiebanner" i]',
+        '[aria-label*="cookie" i][role="dialog"]'
+      ];
+
+      function rejectKnownCMPs() {
+        try { if (window.Cookiebot && Cookiebot.submitCustomConsent) Cookiebot.submitCustomConsent(false, false, false); } catch (e) {}
+        try { if (window.OneTrust && OneTrust.RejectAll) OneTrust.RejectAll(); } catch (e) {}
+        try {
+          if (window.didomiOnReady && didomiOnReady.push) {
+            didomiOnReady.push(function (Didomi) { try { Didomi.setUserDisagreeToAll(); } catch (e) {} });
+          }
+        } catch (e) {}
+        try {
+          if (typeof window.__tcfapi === 'function') {
+            window.__tcfapi('setGdprApplies', 2, function () {}, 0);
+          }
+        } catch (e) {}
+        try { if (window.__cmp) window.__cmp('setConsent', null, function () {}, false); } catch (e) {}
+        try { if (window.Osano && Osano.cm && Osano.cm.denyAll) Osano.cm.denyAll(); } catch (e) {}
+      }
+
+      function hide() {
+        for (var i = 0; i < selectors.length; i++) {
+          try {
+            var els = document.querySelectorAll(selectors[i]);
+            for (var j = 0; j < els.length; j++) els[j].style.setProperty('display', 'none', 'important');
+          } catch (e) {}
+        }
+        // Many banners lock page scroll while shown; undo that once hidden.
+        if (document.documentElement) document.documentElement.style.overflow = '';
+        if (document.body) document.body.style.overflow = '';
+      }
+
+      function run() { hide(); rejectKnownCMPs(); }
+      if (document.documentElement) run(); else document.addEventListener('DOMContentLoaded', run, { once: true });
+
+      var observer = new MutationObserver(hide);
+      function observe() {
+        if (document.documentElement) observer.observe(document.documentElement, { childList: true, subtree: true });
+      }
+      if (document.documentElement) observe(); else document.addEventListener('DOMContentLoaded', observe, { once: true });
+
+      // Banners frequently arrive late via their own async script; keep trying briefly.
+      [400, 1000, 2000, 4000].forEach(function (t) { setTimeout(run, t); });
     })();
     """
 
