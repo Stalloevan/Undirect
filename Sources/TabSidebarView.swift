@@ -36,6 +36,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let divider = UIView()
+    private let toggleButton = UIButton(type: .system)
 
     // Collapsed-mode controls
     private let collapsedStack = UIStackView()
@@ -53,6 +54,11 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         super.init(frame: frame)
         backgroundColor = Theme.bar
         clipsToBounds = false
+
+        toggleButton.setImage(UIImage(systemName: "sidebar.left"), for: .normal)
+        toggleButton.tintColor = Theme.secondaryText
+        toggleButton.accessibilityLabel = "Show all tabs"
+        toggleButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidToggleExpanded() }, for: .touchUpInside)
 
         // Collapsed: current-tab icon (tap to expand, long-press for actions), add button below.
         currentTabIcon.contentMode = .scaleAspectFill
@@ -103,15 +109,20 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 
         divider.backgroundColor = UIColor(white: 1, alpha: 0.06)
 
-        for v in [collapsedStack, tableView, divider] {
+        for v in [toggleButton, collapsedStack, tableView, divider] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            collapsedStack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            toggleButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 2),
+            toggleButton.centerXAnchor.constraint(equalTo: centerXAnchor, constant: 0),
+            toggleButton.widthAnchor.constraint(equalToConstant: Self.collapsedWidth),
+            toggleButton.heightAnchor.constraint(equalToConstant: 34),
+
+            collapsedStack.topAnchor.constraint(equalTo: toggleButton.bottomAnchor, constant: 4),
             collapsedStack.centerXAnchor.constraint(equalTo: centerXAnchor),
 
-            tableView.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            tableView.topAnchor.constraint(equalTo: toggleButton.bottomAnchor, constant: 2),
             tableView.leadingAnchor.constraint(equalTo: leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -140,6 +151,8 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         isExpanded = expanded
         collapsedStack.isHidden = expanded
         tableView.isHidden = !expanded
+        toggleButton.setImage(UIImage(systemName: expanded ? "sidebar.leading" : "sidebar.left"), for: .normal)
+        toggleButton.accessibilityLabel = expanded ? "Collapse tabs" : "Show all tabs"
         if expanded { tableView.reloadData() }
         layoutRows()
     }

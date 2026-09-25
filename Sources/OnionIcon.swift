@@ -1,8 +1,8 @@
 import UIKit
 
-/// A simple concentric-rings onion glyph (matching Tor's own mark), drawn by
-/// hand since SF Symbols has nothing like it. Rendered as a template image so
-/// it tints exactly like a system symbol wherever it's used.
+/// A layered onion-bulb glyph, drawn by hand since SF Symbols has nothing
+/// like it. Rendered as a template image so it tints exactly like a system
+/// symbol wherever it's used.
 enum OnionIcon {
     private static var cache: [CGFloat: UIImage] = [:]
 
@@ -12,18 +12,53 @@ enum OnionIcon {
         let image = renderer.image { ctx in
             let cg = ctx.cgContext
             UIColor.black.setStroke()
-            let center = CGPoint(x: pointSize / 2, y: pointSize * 0.44)
-            let radii: [CGFloat] = [0.42, 0.28, 0.145].map { $0 * pointSize }
-            cg.setLineWidth(max(1.2, pointSize * 0.075))
+            cg.setLineWidth(max(1.1, pointSize * 0.062))
             cg.setLineCap(.round)
-            for r in radii {
-                cg.strokeEllipse(in: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
+            cg.setLineJoin(.round)
+
+            // A rounded bulb tapering to a point at top, in unit space (0...1),
+            // centered on (0.5, 0.58). Reused at a few scales for the "layers".
+            let center = CGPoint(x: pointSize * 0.5, y: pointSize * 0.58)
+            func point(_ x: CGFloat, _ y: CGFloat, scale: CGFloat) -> CGPoint {
+                CGPoint(x: center.x + (x - 0.5) * pointSize * scale,
+                        y: center.y + (y - 0.58) * pointSize * scale)
             }
-            let rootY = center.y + radii[0]
-            let rootLen = pointSize * 0.16
-            for dx: CGFloat in [-0.22, 0, 0.22] {
-                cg.move(to: CGPoint(x: center.x + dx * pointSize, y: rootY - pointSize * 0.02))
-                cg.addLine(to: CGPoint(x: center.x + dx * pointSize * 1.7, y: rootY + rootLen))
+            func bulbPath(scale: CGFloat) -> UIBezierPath {
+                let path = UIBezierPath()
+                path.move(to: point(0.50, 0.16, scale: scale))
+                path.addCurve(to: point(0.19, 0.46, scale: scale),
+                              controlPoint1: point(0.31, 0.18, scale: scale),
+                              controlPoint2: point(0.19, 0.29, scale: scale))
+                path.addCurve(to: point(0.50, 0.96, scale: scale),
+                              controlPoint1: point(0.19, 0.68, scale: scale),
+                              controlPoint2: point(0.31, 0.93, scale: scale))
+                path.addCurve(to: point(0.81, 0.46, scale: scale),
+                              controlPoint1: point(0.69, 0.93, scale: scale),
+                              controlPoint2: point(0.81, 0.68, scale: scale))
+                path.addCurve(to: point(0.50, 0.16, scale: scale),
+                              controlPoint1: point(0.81, 0.29, scale: scale),
+                              controlPoint2: point(0.69, 0.18, scale: scale))
+                path.close()
+                return path
+            }
+
+            bulbPath(scale: 1.0).stroke()
+            bulbPath(scale: 0.60).stroke()
+            bulbPath(scale: 0.30).stroke()
+
+            // Sprout at the top of the bulb.
+            let tip = point(0.50, 0.16, scale: 1.0)
+            cg.move(to: tip)
+            cg.addLine(to: CGPoint(x: tip.x, y: tip.y - pointSize * 0.14))
+            cg.move(to: tip)
+            cg.addLine(to: CGPoint(x: tip.x - pointSize * 0.09, y: tip.y - pointSize * 0.08))
+            cg.strokePath()
+
+            // Roots at the bottom.
+            let bottom = point(0.50, 0.96, scale: 1.0)
+            for dx: CGFloat in [-0.13, 0, 0.13] {
+                cg.move(to: CGPoint(x: bottom.x + dx * pointSize, y: bottom.y - pointSize * 0.015))
+                cg.addLine(to: CGPoint(x: bottom.x + dx * pointSize * 1.7, y: bottom.y + pointSize * 0.11))
             }
             cg.strokePath()
         }
