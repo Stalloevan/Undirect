@@ -5,8 +5,8 @@ protocol TabSidebarDelegate: AnyObject {
     func sidebarDidClose(index: Int)
     /// nil means "use the default (Settings.shared.torForNewTabs)".
     func sidebarDidRequestNewTab(tor: Bool?)
-    /// Cycles hidden → minimal → full → hidden.
-    func sidebarDidRequestAdvanceState()
+    /// Toggles exclusively between minimal and full — never touches hidden.
+    func sidebarDidRequestToggleFull()
     func sidebarMenu(for index: Int) -> UIMenu?
 }
 
@@ -56,7 +56,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         clipsToBounds = false
 
         toggleButton.tintColor = Theme.secondaryText
-        toggleButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidRequestAdvanceState() }, for: .touchUpInside)
+        toggleButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidRequestToggleFull() }, for: .touchUpInside)
 
         tableView.backgroundColor = .clear
         tableView.separatorStyle = .none
@@ -112,13 +112,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
     }
 
     private func layoutRows() {
-        var newRows: [Row] = []
-        for i in items.indices {
-            newRows.append(.tab(i))
-            if i == (selectedTabIndex ?? -1) { newRows.append(.addTab) }
-        }
-        if selectedTabIndex == nil { newRows.append(.addTab) }
-        rows = newRows
+        rows = items.indices.map { .tab($0) } + [.addTab]
 
         tableView.reloadData()
         if let selected = selectedTabIndex, let rowIndex = rows.firstIndex(of: .tab(selected)) {

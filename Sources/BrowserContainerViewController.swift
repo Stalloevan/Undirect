@@ -17,6 +17,7 @@ final class BrowserContainerViewController: UIViewController {
     private lazy var pageMenuButton = UIButton(type: .system)
     private let progressView = UIProgressView(progressViewStyle: .bar)
     private let sidebar = TabSidebarView()
+    private let sidebarBackdrop = UIView()
     private var sidebarWidth: NSLayoutConstraint!
     private let pulloutHandle = PulloutHandleView()
     private var pulloutLeading: NSLayoutConstraint!
@@ -74,6 +75,7 @@ final class BrowserContainerViewController: UIViewController {
         nc.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
         nc.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
 
+        setupPageInteractionAutoHide()
         restoreSession()
     }
 
@@ -99,6 +101,10 @@ final class BrowserContainerViewController: UIViewController {
         let fieldBackground = UIView()
         fieldBackground.backgroundColor = Theme.field
         fieldBackground.layer.cornerRadius = 11
+
+        let menuBackground = UIView()
+        menuBackground.backgroundColor = Theme.field
+        menuBackground.layer.cornerRadius = 11
 
         addressIcon.tintColor = Theme.secondaryText
         addressIcon.contentMode = .scaleAspectFit
@@ -130,18 +136,21 @@ final class BrowserContainerViewController: UIViewController {
         progressView.trackTintColor = .clear
 
         sidebar.delegate = self
+        sidebarBackdrop.backgroundColor = Theme.bar
 
         contentView.backgroundColor = Theme.background
         contentView.clipsToBounds = true
 
-        for v in [contentView, sidebar, addressBarBackdrop, addressBar, progressView, pickerBanner, pulloutHandle] as [UIView] {
+        for v in [contentView, sidebarBackdrop, sidebar, addressBarBackdrop, addressBar, progressView, pickerBanner, pulloutHandle] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
-        for v in [fieldBackground, addressIcon, addressField, reloadButton, pageMenuButton] as [UIView] {
+        for v in [fieldBackground, addressIcon, addressField, reloadButton, menuBackground] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addressBar.addSubview(v)
         }
+        pageMenuButton.translatesAutoresizingMaskIntoConstraints = false
+        menuBackground.addSubview(pageMenuButton)
         pickerBanner.isHidden = true
         pickerBanner.onCancel = { [weak self] in self?.stopPicking() }
 
@@ -170,7 +179,7 @@ final class BrowserContainerViewController: UIViewController {
             addressBarBackdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             fieldBackground.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 10),
-            fieldBackground.trailingAnchor.constraint(equalTo: pageMenuButton.leadingAnchor, constant: -6),
+            fieldBackground.trailingAnchor.constraint(equalTo: menuBackground.leadingAnchor, constant: -6),
             fieldBackground.topAnchor.constraint(equalTo: addressBar.topAnchor, constant: 7),
             fieldBackground.heightAnchor.constraint(equalToConstant: 36),
 
@@ -189,8 +198,13 @@ final class BrowserContainerViewController: UIViewController {
             reloadButton.widthAnchor.constraint(equalToConstant: 32),
             reloadButton.heightAnchor.constraint(equalToConstant: 32),
 
-            pageMenuButton.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -10),
-            pageMenuButton.centerYAnchor.constraint(equalTo: fieldBackground.centerYAnchor),
+            menuBackground.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -10),
+            menuBackground.centerYAnchor.constraint(equalTo: fieldBackground.centerYAnchor),
+            menuBackground.widthAnchor.constraint(equalToConstant: 42),
+            menuBackground.heightAnchor.constraint(equalToConstant: 36),
+
+            pageMenuButton.centerXAnchor.constraint(equalTo: menuBackground.centerXAnchor),
+            pageMenuButton.centerYAnchor.constraint(equalTo: menuBackground.centerYAnchor),
             pageMenuButton.widthAnchor.constraint(equalToConstant: 32),
             pageMenuButton.heightAnchor.constraint(equalToConstant: 32),
 
@@ -201,6 +215,11 @@ final class BrowserContainerViewController: UIViewController {
 
             sidebar.topAnchor.constraint(equalTo: safe.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: addressBar.topAnchor),
+
+            sidebarBackdrop.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebarBackdrop.bottomAnchor.constraint(equalTo: sidebar.topAnchor),
+            sidebarBackdrop.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            sidebarBackdrop.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
 
             contentView.topAnchor.constraint(equalTo: view.topAnchor),
             contentView.bottomAnchor.constraint(equalTo: addressBar.topAnchor),
@@ -217,7 +236,10 @@ final class BrowserContainerViewController: UIViewController {
         ])
         pulloutLeading = pulloutHandle.leadingAnchor.constraint(equalTo: view.leadingAnchor)
         pulloutTrailing = pulloutHandle.trailingAnchor.constraint(equalTo: view.trailingAnchor)
-        pulloutHandle.onActivate = { [weak self] in self?.advanceSidebarState(animated: true) }
+        pulloutHandle.onActivate = { [weak self] in
+            guard let self, self.sidebarState == .hidden else { return }
+            self.setSidebarState(.minimal, animated: true)
+        }
         pulloutHandle.menuProvider = { [weak self] in
             guard let self else { return nil }
             return self.tabMenu(for: self.selectedIndex)
@@ -272,14 +294,29 @@ final class BrowserContainerViewController: UIViewController {
         }
     }
 
-    private func advanceSidebarState(animated: Bool) {
-        let next: SidebarState
-        switch sidebarState {
-        case .hidden: next = .minimal
-        case .minimal: next = .full
-        case .full: next = .hidden
-        }
-        setSidebarState(next, animated: animated)
+    /// The page-content area (tap or start of a scroll) collapses the sidebar
+    /// back to hidden, whichever of the two visible states it was in.
+    private func setupPageInteractionAutoHide() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handlePageTap))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        contentView.addGestureRecognizer(tap)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePagePan(_:)))
+        pan.cancelsTouchesInView = false
+        pan.delegate = self
+        contentView.addGestureRecognizer(pan)
+    }
+
+    @objc private func handlePageTap() {
+        guard sidebarState != .hidden else { return }
+        setSidebarState(.hidden, animated: true)
+    }
+
+    @objc private func handlePagePan(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.state == .began, sidebarState != .hidden else { return }
+        setSidebarState(.hidden, animated: true)
+    }
     }
 
     // MARK: Tabs
@@ -657,6 +694,12 @@ final class BrowserContainerViewController: UIViewController {
 
 // MARK: - Address field
 
+extension BrowserContainerViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        true
+    }
+}
+
 extension BrowserContainerViewController: UITextFieldDelegate {
     func textFieldDidBeginEditing(_ textField: UITextField) {
         textField.text = currentTab?.webView.url?.absoluteString ?? ""
@@ -693,8 +736,9 @@ extension BrowserContainerViewController: TabSidebarDelegate {
         openTab(url: nil, tor: tor)
     }
 
-    func sidebarDidRequestAdvanceState() {
-        advanceSidebarState(animated: true)
+    func sidebarDidRequestToggleFull() {
+        guard sidebarState != .hidden else { return }
+        setSidebarState(sidebarState == .full ? .minimal : .full, animated: true)
     }
 
     func sidebarMenu(for index: Int) -> UIMenu? {
