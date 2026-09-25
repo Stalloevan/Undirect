@@ -38,6 +38,7 @@ enum Theme {
     private static func palette() -> ThemePalette {
         switch Settings.shared.appTheme {
         case .catppuccin:
+            // Kept the softest, most rounded of the three.
             return ThemePalette(
                 background: UIColor(red: 0.07, green: 0.07, blue: 0.09, alpha: 1),
                 bar: UIColor(red: 0.11, green: 0.11, blue: 0.14, alpha: 1),
@@ -47,11 +48,12 @@ enum Theme {
                 tor: UIColor(red: 0.62, green: 0.45, blue: 0.95, alpha: 1),
                 text: UIColor(white: 0.92, alpha: 1),
                 secondaryText: UIColor(white: 0.62, alpha: 1),
-                cornerRadius: 11,
-                smallCornerRadius: 7,
+                cornerRadius: 16,
+                smallCornerRadius: 9,
                 isDark: true
             )
         case .nord:
+            // Same Nord palette, but hard, crisp, unrounded edges throughout.
             return ThemePalette(
                 background: UIColor(red: 0.098, green: 0.114, blue: 0.145, alpha: 1),
                 bar: UIColor(red: 0.149, green: 0.169, blue: 0.212, alpha: 1),
@@ -61,25 +63,26 @@ enum Theme {
                 tor: UIColor(red: 0.506, green: 0.631, blue: 0.757, alpha: 1),
                 text: UIColor(red: 0.925, green: 0.937, blue: 0.957, alpha: 1),
                 secondaryText: UIColor(red: 0.635, green: 0.663, blue: 0.710, alpha: 1),
-                cornerRadius: 11,
-                smallCornerRadius: 7,
+                cornerRadius: 0,
+                smallCornerRadius: 0,
                 isDark: true
             )
         case .retro95:
-            // Classic Windows 95/98: silver chrome, navy titlebar blue, white
-            // input fields, black text, square corners everywhere. There's
-            // no true 3D bevel rendering here — that would mean reworking
-            // every custom-drawn control's border code — but the palette and
-            // squared-off corners alone get most of the way to the look.
+            // A warm beige retro-computer look (cream chassis, amber CRT
+            // accent, dark brown text, teal-green secondary accent) rather
+            // than Windows-95-specific gray/navy. There's no true 3D bevel
+            // rendering here — that would mean reworking every custom-drawn
+            // control's border code — but the palette and squared-off
+            // corners alone get most of the way to the look.
             return ThemePalette(
-                background: UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1),
-                bar: UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1),
-                surface: UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1),
-                field: UIColor.white,
-                accent: UIColor(red: 0.0, green: 0.0, blue: 0.502, alpha: 1),
-                tor: UIColor(red: 0.0, green: 0.376, blue: 0.376, alpha: 1),
-                text: UIColor.black,
-                secondaryText: UIColor(white: 0.30, alpha: 1),
+                background: UIColor(red: 0.827, green: 0.784, blue: 0.702, alpha: 1),
+                bar: UIColor(red: 0.780, green: 0.729, blue: 0.639, alpha: 1),
+                surface: UIColor(red: 0.780, green: 0.729, blue: 0.639, alpha: 1),
+                field: UIColor(red: 0.949, green: 0.925, blue: 0.867, alpha: 1),
+                accent: UIColor(red: 0.541, green: 0.325, blue: 0.129, alpha: 1),
+                tor: UIColor(red: 0.212, green: 0.400, blue: 0.361, alpha: 1),
+                text: UIColor(red: 0.157, green: 0.125, blue: 0.078, alpha: 1),
+                secondaryText: UIColor(red: 0.416, green: 0.361, blue: 0.290, alpha: 1),
                 cornerRadius: 0,
                 smallCornerRadius: 0,
                 isDark: false
