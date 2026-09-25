@@ -70,7 +70,12 @@ final class Tab: NSObject {
         messageProxy.owner = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
+        // Full-page swipe-to-navigate is implemented at the container level
+        // (BrowserContainerViewController's page pan handler) instead of
+        // WebKit's own edge-only gesture, so it works from anywhere on the
+        // page, not just the screen edge. Leaving both active would double-
+        // navigate on edge swipes since they'd both fire for the same drag.
+        webView.allowsBackForwardNavigationGestures = false
         webView.allowsLinkPreview = false
         webView.isOpaque = false
         webView.backgroundColor = Theme.background
@@ -357,8 +362,7 @@ extension Tab: WKNavigationDelegate {
     private func loadFavicon() {
         guard let host = webView.url?.host else { return }
         if isTor {
-            // Never fetch anything outside Tor for a Tor tab.
-            favicon = nil
+            loadFaviconWithinPage(host: host)
             return
         }
         if let cached = FaviconStore.shared.cached(host: host) {
@@ -374,6 +378,39 @@ extension Tab: WKNavigationDelegate {
                 self.favicon = image
                 self.delegate?.tabDidChange(self)
             }
+        }
+    }
+
+    /// Fetches the favicon using the page's own `fetch()`, so the request
+    /// goes through the same Tor circuit as the rest of the tab instead of a
+    /// separate, unproxied URLSession — a plain fetch would otherwise leak
+    /// this specific request outside Tor. Nothing is written to disk; the
+    /// image only ever lives in memory, matching the rest of a Tor tab.
+    private func loadFaviconWithinPage(host: String) {
+        let js = """
+        var link = document.querySelector('link[rel~="apple-touch-icon"]') || document.querySelector('link[rel~="icon"]');
+        var href = link ? link.href : (location.origin + '/favicon.ico');
+        try {
+          var response = await fetch(href);
+          if (!response.ok) return null;
+          var blob = await response.blob();
+          return await new Promise(function (resolve) {
+            var reader = new FileReader();
+            reader.onloadend = function () { resolve(reader.result); };
+            reader.onerror = function () { resolve(null); };
+            reader.readAsDataURL(blob);
+          });
+        } catch (e) { return null; }
+        """
+        webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] result in
+            guard let self, self.webView.url?.host == host,
+                  case .success(let value) = result,
+                  let dataURL = value as? String,
+                  let comma = dataURL.firstIndex(of: ","),
+                  let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
+                  let image = UIImage(data: data) else { return }
+            self.favicon = image
+            self.delegate?.tabDidChange(self)
         }
     }
 }

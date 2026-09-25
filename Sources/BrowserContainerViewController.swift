@@ -102,10 +102,6 @@ final class BrowserContainerViewController: UIViewController {
         fieldBackground.backgroundColor = Theme.field
         fieldBackground.layer.cornerRadius = 11
 
-        let menuBackground = UIView()
-        menuBackground.backgroundColor = Theme.field
-        menuBackground.layer.cornerRadius = 11
-
         addressIcon.tintColor = Theme.secondaryText
         addressIcon.contentMode = .scaleAspectFit
 
@@ -145,12 +141,12 @@ final class BrowserContainerViewController: UIViewController {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
-        for v in [fieldBackground, addressIcon, addressField, reloadButton, menuBackground] as [UIView] {
+        for v in [fieldBackground, addressIcon, addressField, reloadButton] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addressBar.addSubview(v)
         }
         pageMenuButton.translatesAutoresizingMaskIntoConstraints = false
-        menuBackground.addSubview(pageMenuButton)
+        fieldBackground.addSubview(pageMenuButton)
         pickerBanner.isHidden = true
         pickerBanner.onCancel = { [weak self] in self?.stopPicking() }
 
@@ -179,7 +175,7 @@ final class BrowserContainerViewController: UIViewController {
             addressBarBackdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             fieldBackground.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 10),
-            fieldBackground.trailingAnchor.constraint(equalTo: menuBackground.leadingAnchor, constant: -6),
+            fieldBackground.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -10),
             fieldBackground.topAnchor.constraint(equalTo: addressBar.topAnchor, constant: 7),
             fieldBackground.heightAnchor.constraint(equalToConstant: 36),
 
@@ -193,18 +189,13 @@ final class BrowserContainerViewController: UIViewController {
             addressField.topAnchor.constraint(equalTo: fieldBackground.topAnchor),
             addressField.bottomAnchor.constraint(equalTo: fieldBackground.bottomAnchor),
 
-            reloadButton.trailingAnchor.constraint(equalTo: fieldBackground.trailingAnchor, constant: -4),
+            reloadButton.trailingAnchor.constraint(equalTo: pageMenuButton.leadingAnchor, constant: -2),
             reloadButton.centerYAnchor.constraint(equalTo: fieldBackground.centerYAnchor),
             reloadButton.widthAnchor.constraint(equalToConstant: 32),
             reloadButton.heightAnchor.constraint(equalToConstant: 32),
 
-            menuBackground.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -10),
-            menuBackground.centerYAnchor.constraint(equalTo: fieldBackground.centerYAnchor),
-            menuBackground.widthAnchor.constraint(equalToConstant: 42),
-            menuBackground.heightAnchor.constraint(equalToConstant: 36),
-
-            pageMenuButton.centerXAnchor.constraint(equalTo: menuBackground.centerXAnchor),
-            pageMenuButton.centerYAnchor.constraint(equalTo: menuBackground.centerYAnchor),
+            pageMenuButton.trailingAnchor.constraint(equalTo: fieldBackground.trailingAnchor, constant: -4),
+            pageMenuButton.centerYAnchor.constraint(equalTo: fieldBackground.centerYAnchor),
             pageMenuButton.widthAnchor.constraint(equalToConstant: 32),
             pageMenuButton.heightAnchor.constraint(equalToConstant: 32),
 
@@ -314,8 +305,26 @@ final class BrowserContainerViewController: UIViewController {
     }
 
     @objc private func handlePagePan(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .began, sidebarState != .hidden else { return }
-        setSidebarState(.hidden, animated: true)
+        switch gesture.state {
+        case .began:
+            if sidebarState != .hidden { setSidebarState(.hidden, animated: true) }
+        case .ended:
+            guard let webView = currentTab?.webView else { return }
+            let translation = gesture.translation(in: contentView)
+            let velocity = gesture.velocity(in: contentView)
+            // Require a clearly horizontal, deliberate swipe so it doesn't
+            // fight with a page's own vertical scrolling or horizontal
+            // carousels/tables.
+            guard abs(translation.x) > 60, abs(translation.x) > abs(translation.y) * 1.8,
+                  abs(velocity.x) > abs(velocity.y) else { return }
+            if translation.x > 0, webView.canGoBack {
+                webView.goBack()
+            } else if translation.x < 0, webView.canGoForward {
+                webView.goForward()
+            }
+        default:
+            break
+        }
     }
 
     // MARK: Tabs

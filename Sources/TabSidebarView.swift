@@ -157,15 +157,6 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         }
     }
 
-    func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard case .tab(let index) = rows[indexPath.row] else { return nil }
-        let close = UIContextualAction(style: .destructive, title: "Close") { [weak self] _, _, done in
-            self?.delegate?.sidebarDidClose(index: index)
-            done(true)
-        }
-        return UISwipeActionsConfiguration(actions: [close])
-    }
-
     func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard case .tab(let index) = rows[indexPath.row] else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in self?.delegate?.sidebarMenu(for: index) }
@@ -203,6 +194,11 @@ private final class TabCell: UITableViewCell {
         spinner.color = Theme.secondaryText
         spinner.hidesWhenStopped = true
 
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
+        doubleTap.numberOfTapsRequired = 2
+        contentView.addGestureRecognizer(doubleTap)
+        accessibilityHint = "Double-tap to close"
+
         for v in [highlight, ring, iconView, titleLabel, closeButton, spinner] {
             v.translatesAutoresizingMaskIntoConstraints = false
             contentView.addSubview(v)
@@ -238,6 +234,8 @@ private final class TabCell: UITableViewCell {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func handleDoubleTap() { onClose?() }
 
     func configure(item: SidebarItem, compact: Bool) {
         iconView.image = item.icon
