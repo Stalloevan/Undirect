@@ -259,6 +259,7 @@ final class Tab: NSObject {
     private func block(_ kind: StatKind, host: String) {
         BlockStats.shared.increment(kind)
         let what = kind == .popups ? "pop-up" : "redirect"
+        AppLog.shared.log("Blocked \(what) to \(host) from \(webView.url?.absoluteString ?? "?")", category: "block")
         delegate?.tab(self, toast: "Blocked \(what) to \(DomainUtil.baseDomain(host))")
         // Click-through exists for redirect overlays that disappear after a
         // tap. A pop-up is a persistent link/button, not a vanishing layer —
@@ -372,10 +373,12 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         userChainActive = false
+        AppLog.shared.log("Provisional navigation failed for \(webView.url?.absoluteString ?? "?"): \(error.localizedDescription)", category: "nav")
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         userChainActive = false
+        AppLog.shared.log("Navigation failed for \(webView.url?.absoluteString ?? "?"): \(error.localizedDescription)", category: "nav")
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -386,6 +389,7 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        AppLog.shared.log("Web content process terminated for \(webView.url?.absoluteString ?? "?") — reloading", category: "nav")
         webView.reload()
     }
 

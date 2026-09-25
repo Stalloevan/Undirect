@@ -33,6 +33,7 @@ final class TorManager {
         didSet {
             guard state != oldValue else { return }
             let s = state
+            AppLog.shared.log("Tor state -> \(s.description)", category: "tor")
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: Self.stateDidChange, object: nil, userInfo: ["state": s])
             }

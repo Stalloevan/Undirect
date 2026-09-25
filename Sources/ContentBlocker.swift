@@ -126,7 +126,10 @@ final class ContentBlocker {
                 }
                 let json = spec.1()
                 store.compileContentRuleList(forIdentifier: spec.0, encodedContentRuleList: json) { list, error in
-                    if let error { NSLog("Undirect: rule list \(spec.0) failed: \(error)") }
+                    if let error {
+                        NSLog("Undirect: rule list \(spec.0) failed: \(error)")
+                        AppLog.shared.log("Rule list \(spec.0) failed to compile: \(error.localizedDescription)", category: "block")
+                    }
                     results[i] = list
                     group.leave()
                 }
@@ -137,6 +140,7 @@ final class ContentBlocker {
             guard gen == self.generation else { return }
             self.ruleLists = results.compactMap { $0 }
             self.isCompiling = false
+            AppLog.shared.log("Content rules compiled: \(self.ruleLists.count)/\(specs.count) lists, \(self.blockedDomains.count) blocked domains", category: "block")
             NotificationCenter.default.post(name: Self.didUpdate, object: nil)
             self.removeStaleLists(keeping: Set(specs.map { $0.0 }))
         }

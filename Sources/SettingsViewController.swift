@@ -167,9 +167,34 @@ final class SettingsViewController: SettingsTableViewController {
                 })),
                 SettingsRow(title: "Trusted sites (redirects & pop-ups)", kind: .push({ WhitelistViewController() })),
                 SettingsRow(title: "Reset blocking statistics", kind: .action({ BlockStats.shared.reset() }), destructive: true)
+            ]),
+            SettingsSection(title: "Diagnostics", footer: "A rolling log of blocked redirects/pop-ups, Tor status, and navigation errors, kept only on this device. Export creates a text file you choose where to send.", rows: [
+                SettingsRow(title: "Export Logs", kind: .action({ [weak self] in self?.exportLogs() })),
+                SettingsRow(title: "Clear Logs", kind: .action({ AppLog.shared.clear() }), destructive: true)
             ])
         ]
         super.rebuild()
+    }
+
+    private func exportLogs() {
+        AppLog.shared.exportText { [weak self] text in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("undirect-log-\(Int(Date().timeIntervalSince1970)).txt")
+                do {
+                    try text.write(to: url, atomically: true, encoding: .utf8)
+                } catch {
+                    self.toast("Couldn't prepare the log file")
+                    return
+                }
+                let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+                if let popover = activity.popoverPresentationController {
+                    popover.sourceView = self.view
+                    popover.sourceRect = CGRect(x: self.view.bounds.midX, y: self.view.bounds.midY, width: 0, height: 0)
+                }
+                self.present(activity, animated: true)
+            }
+        }
     }
 
     private func toast(_ text: String) {

@@ -168,6 +168,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 private final class TabCell: UITableViewCell {
     private let iconView = UIImageView()
     private let titleLabel = UILabel()
+    private let torBadge = UIImageView(image: OnionIcon.image(pointSize: 14))
     private let closeButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
     private var isSelectedTab = false
@@ -185,6 +186,8 @@ private final class TabCell: UITableViewCell {
         iconView.contentMode = .scaleAspectFill
         titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
         titleLabel.textColor = Theme.text
+        torBadge.tintColor = Theme.tor
+        torBadge.contentMode = .scaleAspectFit
         closeButton.setImage(Theme.icon("xmark"), for: .normal)
         closeButton.tintColor = Theme.secondaryText
         closeButton.addAction(UIAction { [weak self] _ in self?.onClose?() }, for: .touchUpInside)
@@ -196,7 +199,7 @@ private final class TabCell: UITableViewCell {
         contentView.addGestureRecognizer(doubleTap)
         accessibilityHint = "Double-tap to close"
 
-        for v in [iconView, titleLabel, closeButton, spinner] {
+        for v in [iconView, titleLabel, torBadge, closeButton, spinner] {
             v.translatesAutoresizingMaskIntoConstraints = false
             contentView.addSubview(v)
         }
@@ -211,7 +214,12 @@ private final class TabCell: UITableViewCell {
 
             titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.minimalWidth),
             titleLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            titleLabel.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -4),
+            titleLabel.trailingAnchor.constraint(equalTo: torBadge.leadingAnchor, constant: -6),
+
+            torBadge.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
+            torBadge.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            torBadge.widthAnchor.constraint(equalToConstant: 16),
+            torBadge.heightAnchor.constraint(equalToConstant: 16),
 
             closeButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
             closeButton.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
@@ -228,10 +236,9 @@ private final class TabCell: UITableViewCell {
         iconView.image = item.icon
         iconView.alpha = item.isLoading ? 0.35 : 1
         if item.isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
-        iconView.layer.borderWidth = item.isTor ? 2 : 0
-        iconView.layer.borderColor = Theme.tor.cgColor
         titleLabel.text = item.title
         titleLabel.isHidden = compact
+        torBadge.isHidden = compact || !item.isTor
         closeButton.isHidden = compact
         accessibilityLabel = (item.isTor ? "Tor tab: " : "Tab: ") + item.title
 

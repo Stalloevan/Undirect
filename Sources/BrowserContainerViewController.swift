@@ -1028,6 +1028,7 @@ final class PulloutHandleView: UIView {
     var menuProvider: (() -> UIMenu?)?
 
     private let iconView = UIImageView()
+    private let torBadge = UIImageView(image: OnionIcon.image(pointSize: 12))
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let swipeGesture = UISwipeGestureRecognizer()
 
@@ -1039,10 +1040,14 @@ final class PulloutHandleView: UIView {
         iconView.contentMode = .scaleAspectFill
         iconView.layer.cornerRadius = Theme.smallCornerRadius
         iconView.clipsToBounds = true
+        torBadge.tintColor = Theme.tor
+        torBadge.contentMode = .scaleAspectFit
+        torBadge.backgroundColor = Theme.bar
+        torBadge.layer.cornerRadius = 3
         spinner.color = Theme.secondaryText
         spinner.hidesWhenStopped = true
 
-        for v in [iconView, spinner] {
+        for v in [iconView, torBadge, spinner] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -1051,6 +1056,10 @@ final class PulloutHandleView: UIView {
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 32),
             iconView.heightAnchor.constraint(equalToConstant: 32),
+            torBadge.trailingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 3),
+            torBadge.bottomAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 3),
+            torBadge.widthAnchor.constraint(equalToConstant: 14),
+            torBadge.heightAnchor.constraint(equalToConstant: 14),
             spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor)
         ])
@@ -1072,8 +1081,7 @@ final class PulloutHandleView: UIView {
 
     func configure(icon: UIImage, isTor: Bool, isLoading: Bool) {
         iconView.image = icon
-        iconView.layer.borderWidth = isTor ? 2 : 0
-        iconView.layer.borderColor = Theme.tor.cgColor
+        torBadge.isHidden = !isTor
         iconView.alpha = isLoading ? 0.35 : 1
         if isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
     }
