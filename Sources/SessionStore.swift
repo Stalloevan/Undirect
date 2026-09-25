@@ -1,7 +1,8 @@
 import Foundation
 
-/// Persists open (non-Tor) tabs so they survive iOS killing the app in the background.
-/// Tor tabs are deliberately never written to disk.
+/// Persists open tabs so they survive the app being closed or killed in the
+/// background. Tor tabs keep only their current address — never their
+/// history or page state — and reopen through Tor.
 final class SessionStore {
 
     static let shared = SessionStore()
@@ -10,6 +11,8 @@ final class SessionStore {
         let id: UUID
         let url: String?
         let state: Data?
+        /// Optional so sessions saved by older versions still decode.
+        let tor: Bool?
     }
 
     struct SavedSession: Codable {
@@ -24,9 +27,11 @@ final class SessionStore {
     private init() {}
 
     func save(tabs: [Tab], selected: Tab?) {
-        let persistable = tabs.filter { !$0.isTor }
+        let persistable = tabs
         let saved = persistable.map { tab -> SavedTab in
-            SavedTab(id: tab.id, url: tab.url?.absoluteString, state: Self.archive(tab.webView.interactionState))
+            SavedTab(id: tab.id, url: tab.url?.absoluteString,
+                     state: tab.isTor ? nil : Self.archive(tab.webView.interactionState),
+                     tor: tab.isTor)
         }
         let index = selected.flatMap { sel in persistable.firstIndex { $0 === sel } } ?? max(0, persistable.count - 1)
         if let data = try? JSONEncoder().encode(SavedSession(tabs: saved, selected: index)) {
@@ -45,9 +50,13 @@ final class SessionStore {
             let state = defaults.data(forKey: legacyStateKey)
             defaults.removeObject(forKey: legacyURLKey)
             defaults.removeObject(forKey: legacyStateKey)
-            return SavedSession(tabs: [SavedTab(id: UUID(), url: url, state: state)], selected: 0)
+            return SavedSession(tabs: [SavedTab(id: UUID(), url: url, state: state, tor: false)], selected: 0)
         }
         return nil
+    }
+
+    func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
     }
 
     private static func archive(_ state: Any?) -> Data? {

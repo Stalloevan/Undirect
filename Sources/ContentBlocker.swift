@@ -41,6 +41,19 @@ final class ContentBlocker {
     /// of which domain serves them — catches decoy/bait scripts that ad-
     /// blocker test pages serve from their own origin (so a domain-only list
     /// can't see them) as well as first-party-disguised ad loaders.
+    /// IP-geolocation lookup services and analytics ingest hosts that the
+    /// ordinary ad/tracker lists don't cover (e.g. the `ipwho.is` lookup and
+    /// PostHog ingest used by privacy test pages). Blocked only as resources
+    /// a page loads, never as a page you navigate to yourself.
+    private static let shieldDomains = [
+        "ipwho.is", "ipwhois.app", "ipwhois.io", "ipapi.co", "ipapi.com", "ipinfo.io", "ip-api.com",
+        "ipify.org", "geojs.io", "ipgeolocation.io", "ipdata.co", "freeipapi.com", "geoplugin.net",
+        "ip.sb", "db-ip.com", "extreme-ip-lookup.com", "ipregistry.co", "ipbase.com", "ipstack.com",
+        "ipapi.is", "ipquery.io", "iplocation.net", "myip.com", "seeip.org", "ident.me", "icanhazip.com",
+        "i.posthog.com", "eu.i.posthog.com", "us.i.posthog.com", "eu-assets.i.posthog.com",
+        "us-assets.i.posthog.com", "app.posthog.com"
+    ]
+
     private static let blockedScriptPatterns = [
         "/pagead\\.js", "/ads\\.js", "/widget/ads\\.", "/ad-loader\\.js", "/ad-manager\\.js"
     ]
@@ -68,6 +81,7 @@ final class ContentBlocker {
         let level = Settings.shared.blocklistLevel
         let cosmetic = Settings.shared.cosmeticFiltering
         let cookies = Settings.shared.blockThirdPartyCookies
+        let shields = Settings.shared.blockIPLookups
         let version = buildVersion
         isCompiling = true
 
@@ -97,6 +111,9 @@ final class ContentBlocker {
             }
             if level != .off {
                 specs.append(("undirect-scriptpatterns-b\(version)", { Self.scriptPatternJSON() }))
+            }
+            if shields {
+                specs.append(("undirect-shields-b\(version)", { Self.shieldJSON() }))
             }
             if cookies {
                 specs.append(("undirect-3pcookies-b\(version)", { Self.thirdPartyCookieJSON() }))
@@ -206,6 +223,19 @@ final class ContentBlocker {
         // made WebKit reject this whole list (WKErrorDomain 6) before.
         let rules: [[String: Any]] = blockedScriptPatterns.map { pattern in
             ["trigger": ["url-filter": pattern], "action": ["type": "block"]]
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: rules)) ?? Data("[]".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func shieldJSON() -> String {
+        let types = ["raw", "script", "image", "style-sheet", "font", "media", "other"]
+        let rules: [[String: Any]] = shieldDomains.map { domain in
+            let escaped = domain.replacingOccurrences(of: ".", with: "\\.")
+            return [
+                "trigger": ["url-filter": "^[^:]+://+([^:/]+\\.)?\(escaped)[:/]", "resource-type": types],
+                "action": ["type": "block"]
+            ]
         }
         let data = (try? JSONSerialization.data(withJSONObject: rules)) ?? Data("[]".utf8)
         return String(decoding: data, as: UTF8.self)

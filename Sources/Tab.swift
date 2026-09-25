@@ -157,7 +157,18 @@ final class Tab: NSObject {
             return
         }
         pendingURL = nil
-        webView.load(URLRequest(url: url))
+        webView.load(Self.request(for: url))
+    }
+
+    /// Top-level requests carry the Global Privacy Control / Do Not Track
+    /// headers too (the in-page JS signals are set separately).
+    static func request(for url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        if Settings.shared.sendGPC {
+            request.setValue("1", forHTTPHeaderField: "Sec-GPC")
+            request.setValue("1", forHTTPHeaderField: "DNT")
+        }
+        return request
     }
 
     /// Used by the "swipe back past the start of history" gesture — resets
@@ -177,7 +188,7 @@ final class Tab: NSObject {
         guard let url = pendingURL else { return }
         pendingURL = nil
         expectedURL = url
-        webView.load(URLRequest(url: url))
+        webView.load(Self.request(for: url))
     }
 
     func restore(interactionState: Any) {
@@ -589,6 +600,21 @@ extension Tab: WKUIDelegate {
         AppLog.shared.log("Blocked pop-up to \(destHost) from \(webView.url?.absoluteString ?? "?")", category: "block")
         delegate?.tab(self, blockedPopupTo: url)
         return nil
+    }
+
+    /// Camera/microphone requests are refused by default; the page is told
+    /// the same thing it would hear if you tapped "Don't Allow".
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        AppLog.shared.log("Denied camera/microphone request from \(origin.host)", category: "privacy")
+        delegate?.tab(self, toast: "Blocked camera/microphone request")
+        decisionHandler(.deny)
+    }
+
+    func webView(_ webView: WKWebView, requestDeviceOrientationAndMotionPermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(.deny)
     }
 
     func webViewDidClose(_ webView: WKWebView) {

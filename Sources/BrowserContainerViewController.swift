@@ -501,11 +501,23 @@ final class BrowserContainerViewController: UIViewController {
 
     // MARK: Tabs
 
+    /// True once this app process has done its first launch-time restore.
+    /// A theme change rebuilds this controller mid-session, and that rebuild
+    /// must always bring the tabs back, even with "close tabs on exit" on.
+    private static var didInitialRestore = false
+
     private func restoreSession() {
-        if let session = SessionStore.shared.restore(), !session.tabs.isEmpty {
+        let isColdLaunch = !Self.didInitialRestore
+        Self.didInitialRestore = true
+
+        if isColdLaunch && Settings.shared.closeTabsOnExit {
+            SessionStore.shared.clear()
+            AppLog.shared.log("Starting fresh: 'close tabs on exit' is on", category: "app")
+        } else if let session = SessionStore.shared.restore(), !session.tabs.isEmpty {
             for saved in session.tabs {
-                let tab = makeTab(tor: false, id: saved.id)
-                if let state = saved.state, saved.url != nil {
+                let isTor = saved.tor ?? false
+                let tab = makeTab(tor: isTor, id: saved.id)
+                if !isTor, let state = saved.state, saved.url != nil {
                     tab.restore(interactionState: state)
                 } else if let s = saved.url, let url = URL(string: s) {
                     tab.load(url)
@@ -513,11 +525,26 @@ final class BrowserContainerViewController: UIViewController {
                 tabs.append(tab)
             }
             selectedIndex = min(max(0, session.selected), tabs.count - 1)
-        } else {
+            AppLog.shared.log("Restored \(tabs.count) tab(s)", category: "app")
+        }
+        if tabs.isEmpty {
             tabs.append(makeTab(tor: Settings.shared.torForNewTabs))
             selectedIndex = 0
         }
         showCurrentTab()
+    }
+
+    private var persistScheduled = false
+
+    /// Saves shortly after any tab change, so tabs survive even if the app
+    /// is killed without a clean trip through the background.
+    private func schedulePersist() {
+        guard !persistScheduled else { return }
+        persistScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.persistScheduled = false
+            self?.persist()
+        }
     }
 
     private func makeTab(tor: Bool, id: UUID = UUID(), popupConfiguration: WKWebViewConfiguration? = nil) -> Tab {
@@ -534,6 +561,7 @@ final class BrowserContainerViewController: UIViewController {
         let insertAt = min(selectedIndex + 1, tabs.count)
         tabs.insert(tab, at: insertAt)
         if let url { tab.load(url) }
+        schedulePersist()
         if select {
             selectedIndex = insertAt
             showCurrentTab()
@@ -972,6 +1000,7 @@ extension BrowserContainerViewController: TabSidebarDelegate {
 extension BrowserContainerViewController: TabDelegate {
     func tabDidChange(_ tab: Tab) {
         if tab === currentTab { updateChrome() } else { refreshSidebar() }
+        schedulePersist()
     }
 
     func tab(_ tab: Tab, toast message: String) {

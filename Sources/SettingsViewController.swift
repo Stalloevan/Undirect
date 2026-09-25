@@ -132,6 +132,12 @@ final class SettingsViewController: SettingsTableViewController {
                 })),
                 SettingsRow(title: "Hidden elements", kind: .push({ HiddenElementsViewController() }))
             ]),
+            SettingsSection(title: "Anti-tracking", footer: "Fingerprinting protection adds tiny, per-site noise to canvas, WebGL, and audio read-backs and reports common hardware values, so sites can't build a stable ID from your device. Blocking WebRTC stops sites discovering your real IP address, but also breaks video calls in the browser.", rows: [
+                SettingsRow(title: "Fingerprinting protection", kind: .toggle(get: { s.fingerprintProtection }, set: { s.fingerprintProtection = $0 })),
+                SettingsRow(title: "Block WebRTC IP leaks", kind: .toggle(get: { s.blockWebRTC }, set: { s.blockWebRTC = $0 })),
+                SettingsRow(title: "Send Global Privacy Control", kind: .toggle(get: { s.sendGPC }, set: { s.sendGPC = $0 })),
+                SettingsRow(title: "Block IP-lookup & analytics services", kind: .toggle(get: { s.blockIPLookups }, set: { s.blockIPLookups = $0; blockingChanged() }))
+            ]),
             SettingsSection(title: "Cookies", footer: "Cookie-consent pop-ups are rejected and hidden automatically — turn that off above to see them and choose yourself. Sites where you enter a password are remembered automatically so you stay logged in. Everything else is cleared.", rows: [
                 SettingsRow(title: "Auto-dismiss cookie banners", kind: .toggle(get: { s.autoHandleCookieBanners }, set: { s.autoHandleCookieBanners = $0 })),
                 SettingsRow(title: "Block third-party cookies", kind: .toggle(get: { s.blockThirdPartyCookies }, set: { s.blockThirdPartyCookies = $0; blockingChanged() })),
@@ -155,6 +161,7 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Theme", kind: .choice(value: { s.appTheme.title }, options: {
                     AppTheme.allCases.map { theme -> (String, () -> Void) in (theme.title, { s.appTheme = theme }) }
                 })),
+                SettingsRow(title: "Close all tabs when app closes", kind: .toggle(get: { s.closeTabsOnExit }, set: { s.closeTabsOnExit = $0 })),
                 SettingsRow(title: "Preload favorites on Wi-Fi", kind: .toggle(get: { s.preloadFavorites }, set: { s.preloadFavorites = $0 })),
                 SettingsRow(title: "Tab bar side", kind: .choice(value: { s.sidebarPosition.title }, options: {
                     SidebarPosition.allCases.map { pos -> (String, () -> Void) in (pos.title, { s.sidebarPosition = pos }) }

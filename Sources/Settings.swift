@@ -265,6 +265,27 @@ final class Settings {
         get { CookieCleanupMode(rawValue: defaults.string(forKey: "s.cleanup") ?? "") ?? .onTabClose }
         set { set(newValue.rawValue, "s.cleanup") }
     }
+    var fingerprintProtection: Bool {
+        get { bool("s.fpProtect", true) }
+        set { set(newValue, "s.fpProtect") }
+    }
+    var blockWebRTC: Bool {
+        get { bool("s.blockWebRTC", true) }
+        set { set(newValue, "s.blockWebRTC") }
+    }
+    var sendGPC: Bool {
+        get { bool("s.sendGPC", true) }
+        set { set(newValue, "s.sendGPC") }
+    }
+    var blockIPLookups: Bool {
+        get { bool("s.blockIPLookups", true) }
+        set { set(newValue, "s.blockIPLookups") }
+    }
+    /// Off by default: tabs are kept across launches unless the person opts in.
+    var closeTabsOnExit: Bool {
+        get { bool("s.closeTabsOnExit", false) }
+        set { set(newValue, "s.closeTabsOnExit") }
+    }
     var torForNewTabs: Bool {
         get { bool("s.torDefault", false) }
         set { set(newValue, "s.torDefault") }

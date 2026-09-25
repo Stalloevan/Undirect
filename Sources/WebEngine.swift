@@ -29,11 +29,148 @@ enum WebEngine {
         if Settings.shared.autoHandleCookieBanners {
             add(consentAutoHandlerScript, mainFrameOnly: false, world: world)
         }
-        if tor {
-            // WebRTC can reveal your real IP over UDP, bypassing the Tor proxy.
+        // WebRTC can reveal your real IP over UDP (STUN), bypassing any
+        // proxy — always blocked in Tor tabs, and by default everywhere.
+        if tor || Settings.shared.blockWebRTC {
             add(disableWebRTCScript, mainFrameOnly: false, world: .page)
         }
+        if Settings.shared.sendGPC {
+            add(privacySignalScript, mainFrameOnly: false, world: .page)
+        }
+        if Settings.shared.fingerprintProtection || tor {
+            add(fingerprintProtectionScript(tor: tor), mainFrameOnly: false, world: .page)
+        }
     }
+
+    /// Per-launch random seed for fingerprint noise: stable within a session
+    /// (so a page reading its own canvas twice gets the same answer and
+    /// doesn't break), different every launch and for every site — so the
+    /// resulting fingerprint can't link visits together.
+    private static let fingerprintSeed = UInt32.random(in: 1...UInt32.max)
+
+    /// Global Privacy Control + Do Not Track, as JS signals. (The matching
+    /// Sec-GPC/DNT request headers are added to top-level loads in Tab.)
+    private static let privacySignalScript = """
+    (function () {
+      function def(o, k, v) { try { Object.defineProperty(o, k, { get: function () { return v; }, configurable: true }); } catch (e) {} }
+      def(Navigator.prototype, 'globalPrivacyControl', true);
+      def(Navigator.prototype, 'doNotTrack', '1');
+    })();
+    """
+
+    private static func fingerprintProtectionScript(tor: Bool) -> String {
+        """
+        (function () {
+          if (window.__undirectFP) return;
+          window.__undirectFP = true;
+          var host = location.hostname || '';
+          var seed = \(fingerprintSeed) >>> 0;
+          for (var i = 0; i < host.length; i++) { seed ^= host.charCodeAt(i); seed = Math.imul(seed, 16777619) >>> 0; }
+          function mix(i) {
+            var x = (seed ^ Math.imul(i + 1, 2654435761)) >>> 0;
+            x ^= x >>> 16; x = Math.imul(x, 73244475) >>> 0; x ^= x >>> 16;
+            return x >>> 0;
+          }
+          function def(o, k, v) { try { Object.defineProperty(o, k, { get: function () { return v; }, configurable: true }); } catch (e) {} }
+
+          // --- Canvas: tiny deterministic per-site noise on read-back.
+          function noisify(img) {
+            var d = img.data;
+            if (d.length > 16000000) return img;
+            for (var i = 0; i < d.length; i += 4) {
+              var v = mix(i);
+              if ((v & 15) === 0) { var c = i + ((v >>> 4) % 3); d[c] = d[c] ^ 1; }
+            }
+            return img;
+          }
+          var C2D = window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype;
+          if (C2D) {
+            var getImageData = C2D.getImageData;
+            C2D.getImageData = function () { return noisify(getImageData.apply(this, arguments)); };
+            var copy = function (canvas) {
+              try {
+                var w = canvas.width, h = canvas.height;
+                if (!w || !h || w * h > 4000000) return null;
+                var c = document.createElement('canvas'); c.width = w; c.height = h;
+                var ctx = c.getContext('2d');
+                ctx.drawImage(canvas, 0, 0);
+                ctx.putImageData(noisify(getImageData.call(ctx, 0, 0, w, h)), 0, 0);
+                return c;
+              } catch (e) { return null; }
+            };
+            var HC = HTMLCanvasElement.prototype;
+            var toDataURL = HC.toDataURL, toBlob = HC.toBlob;
+            HC.toDataURL = function () { var c = copy(this); return toDataURL.apply(c || this, arguments); };
+            HC.toBlob = function () { var c = copy(this); return toBlob.apply(c || this, arguments); };
+          }
+
+          // --- WebGL: generic GPU strings + read-back noise.
+          function patchGL(P) {
+            if (!P) return;
+            var gp = P.getParameter;
+            P.getParameter = function (p) {
+              if (p === 37445) return 'Apple Inc.';
+              if (p === 37446) return 'Apple GPU';
+              return gp.apply(this, arguments);
+            };
+            var rp = P.readPixels;
+            P.readPixels = function () {
+              var r = rp.apply(this, arguments);
+              var px = arguments[6];
+              if (px && px.length) { for (var i = 0; i < px.length; i += 4) { if ((mix(i) & 15) === 0) px[i] = px[i] ^ 1; } }
+              return r;
+            };
+          }
+          patchGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+          patchGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+
+          // --- Audio: inaudible (~-140 dB) noise on analysis read-back.
+          if (window.AudioBuffer) {
+            var gcd = AudioBuffer.prototype.getChannelData, seen = new WeakSet();
+            AudioBuffer.prototype.getChannelData = function () {
+              var data = gcd.apply(this, arguments);
+              if (!seen.has(data)) {
+                seen.add(data);
+                for (var i = 0; i < data.length; i += 97) data[i] += ((mix(i) & 255) - 128) * 1e-9;
+              }
+              return data;
+            };
+          }
+          if (window.AnalyserNode) {
+            var gffd = AnalyserNode.prototype.getFloatFrequencyData;
+            AnalyserNode.prototype.getFloatFrequencyData = function (arr) {
+              gffd.apply(this, arguments);
+              for (var i = 0; i < arr.length; i++) arr[i] += ((mix(i) & 255) - 128) * 1e-6;
+            };
+          }
+
+          // --- Hardware hints: report common values instead of the real ones.
+          def(Navigator.prototype, 'hardwareConcurrency', 4);
+          if ('deviceMemory' in navigator) def(Navigator.prototype, 'deviceMemory', 4);
+          if (navigator.getBattery) navigator.getBattery = undefined;
+          if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+            navigator.mediaDevices.enumerateDevices = function () { return Promise.resolve([]); };
+          }
+
+          // --- Where you came from: hide cross-site referrers from scripts.
+          try {
+            var ref = document.referrer;
+            if (ref && new URL(ref).hostname !== location.hostname) def(Document.prototype, 'referrer', '');
+          } catch (e) {}
+
+          \(tor ? torUniformityJS : "")
+        })();
+        """
+    }
+
+    /// Tor tabs additionally look like every other Tor user: UTC and en-US.
+    private static let torUniformityJS = """
+          def(Navigator.prototype, 'language', 'en-US');
+          def(Navigator.prototype, 'languages', ['en-US', 'en']);
+          Date.prototype.getTimezoneOffset = function () { return 0; };
+          var ro = Intl.DateTimeFormat.prototype.resolvedOptions;
+          Intl.DateTimeFormat.prototype.resolvedOptions = function () { var r = ro.apply(this, arguments); r.timeZone = 'UTC'; return r; };
+    """
 
     // MARK: Scripts
 
