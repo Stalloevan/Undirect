@@ -1,6 +1,18 @@
 import UIKit
 import WebKit
 
+enum SwipeNavDirection { case back, forward }
+
+/// Live state for an in-progress interactive back/forward swipe.
+struct SwipeNavState {
+    let direction: SwipeNavDirection
+    let item: WKBackForwardListItem
+    let tab: Tab
+    let outgoing: UIView
+    let incoming: UIView
+    let container: UIView
+}
+
 final class BrowserContainerViewController: UIViewController {
 
     private(set) var tabs: [Tab] = []
@@ -40,6 +52,7 @@ final class BrowserContainerViewController: UIViewController {
 
     private var pickingTab: Tab?
     private var lastAppliedSidebarPosition: SidebarPosition?
+    private var swipeNav: SwipeNavState?
 
     // MARK: Lifecycle
 
@@ -308,23 +321,93 @@ final class BrowserContainerViewController: UIViewController {
         switch gesture.state {
         case .began:
             if sidebarState != .hidden { setSidebarState(.hidden, animated: true) }
-        case .ended:
-            guard let webView = currentTab?.webView else { return }
-            let translation = gesture.translation(in: contentView)
-            let velocity = gesture.velocity(in: contentView)
-            // Require a clearly horizontal, deliberate swipe so it doesn't
-            // fight with a page's own vertical scrolling or horizontal
-            // carousels/tables.
-            guard abs(translation.x) > 60, abs(translation.x) > abs(translation.y) * 1.8,
-                  abs(velocity.x) > abs(velocity.y) else { return }
-            if translation.x > 0, webView.canGoBack {
-                webView.goBack()
-            } else if translation.x < 0, webView.canGoForward {
-                webView.goForward()
-            }
+        case .changed:
+            updateSwipeNavigation(gesture)
+        case .ended, .cancelled:
+            finishSwipeNavigation(gesture)
         default:
             break
         }
+    }
+
+    /// Direction is locked in once the drag is clearly horizontal, and the
+    /// current + destination page snapshots start tracking the finger — the
+    /// same interactive feel as Safari's edge-swipe, just usable from
+    /// anywhere on the page (see Tab.swift for why the edge-only WKWebView
+    /// gesture is disabled instead of left running alongside this).
+    private func updateSwipeNavigation(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: contentView)
+
+        if swipeNav == nil {
+            guard abs(translation.x) > 12, abs(translation.x) > abs(translation.y) * 1.5,
+                  let tab = currentTab, !tab.isBlank else { return }
+            let direction: SwipeNavDirection = translation.x > 0 ? .back : .forward
+            let item = direction == .back ? tab.webView.backForwardList.backItem : tab.webView.backForwardList.forwardItem
+            let canGo = direction == .back ? tab.webView.canGoBack : tab.webView.canGoForward
+            guard canGo, let item else { return }
+            beginSwipeNavigation(direction: direction, item: item, tab: tab)
+        }
+        guard let nav = swipeNav else { return }
+
+        let width = max(contentView.bounds.width, 1)
+        var dx = translation.x
+        if abs(dx) > width {
+            let over = abs(dx) - width
+            dx = (dx < 0 ? -1 : 1) * (width + over * 0.2)
+        }
+        nav.outgoing.transform = CGAffineTransform(translationX: dx, y: 0)
+        let incomingRest: CGFloat = nav.direction == .back ? -width : width
+        nav.incoming.transform = CGAffineTransform(translationX: incomingRest + dx, y: 0)
+    }
+
+    private func beginSwipeNavigation(direction: SwipeNavDirection, item: WKBackForwardListItem, tab: Tab) {
+        let bounds = contentView.bounds
+        let container = UIView(frame: bounds)
+        container.clipsToBounds = true
+        container.isUserInteractionEnabled = false
+        contentView.addSubview(container)
+
+        let outgoing = tab.webView.snapshotView(afterScreenUpdates: false) ?? UIView(frame: bounds)
+        outgoing.frame = bounds
+        container.addSubview(outgoing)
+
+        let incoming: UIView
+        if let image = tab.historySnapshot(for: item.url) {
+            let iv = UIImageView(image: image)
+            iv.contentMode = .scaleAspectFill
+            iv.clipsToBounds = true
+            incoming = iv
+        } else {
+            incoming = UIView()
+            incoming.backgroundColor = Theme.background
+        }
+        incoming.frame = bounds
+        container.insertSubview(incoming, belowSubview: outgoing)
+
+        swipeNav = SwipeNavState(direction: direction, item: item, tab: tab, outgoing: outgoing, incoming: incoming, container: container)
+    }
+
+    private func finishSwipeNavigation(_ gesture: UIPanGestureRecognizer) {
+        guard let nav = swipeNav else { return }
+        swipeNav = nil
+
+        let width = max(contentView.bounds.width, 1)
+        let translation = gesture.translation(in: contentView)
+        let velocity = gesture.velocity(in: contentView)
+        let progress = abs(translation.x) / width
+        let commit = progress > 0.35 || abs(velocity.x) > 600
+
+        let outgoingTarget: CGFloat = commit ? (nav.direction == .back ? width : -width) : 0
+        let incomingRest: CGFloat = nav.direction == .back ? -width : width
+        let incomingTarget: CGFloat = commit ? 0 : incomingRest
+
+        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseOut], animations: {
+            nav.outgoing.transform = CGAffineTransform(translationX: outgoingTarget, y: 0)
+            nav.incoming.transform = CGAffineTransform(translationX: incomingTarget, y: 0)
+        }, completion: { _ in
+            nav.container.removeFromSuperview()
+            if commit { nav.tab.webView.go(to: nav.item) }
+        })
     }
 
     // MARK: Tabs
@@ -767,6 +850,15 @@ extension BrowserContainerViewController: TabDelegate {
 
     func tab(_ tab: Tab, openInNewTab url: URL) {
         openTab(url: url, tor: tab.isTor)
+    }
+
+    func tab(_ tab: Tab, openInBackgroundTab url: URL) {
+        openTab(url: url, tor: tab.isTor, select: false)
+        if tab === currentTab { showToast("Opened in background") }
+    }
+
+    func tab(_ tab: Tab, share url: URL) {
+        present(UIActivityViewController(activityItems: [url], applicationActivities: nil), animated: true)
     }
 
     func tab(_ tab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView? {

@@ -5,6 +5,8 @@ protocol TabDelegate: AnyObject {
     func tabDidChange(_ tab: Tab)
     func tab(_ tab: Tab, toast message: String)
     func tab(_ tab: Tab, openInNewTab url: URL)
+    func tab(_ tab: Tab, openInBackgroundTab url: URL)
+    func tab(_ tab: Tab, share url: URL)
     func tab(_ tab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView?
     func tabDidRequestClose(_ tab: Tab)
     func tab(_ tab: Tab, didPick selector: String, label: String)
@@ -23,6 +25,14 @@ final class Tab: NSObject {
 
     private(set) var pendingURL: URL?
     var favicon: UIImage?
+
+    // Snapshots of visited pages, for the interactive swipe-back/forward
+    // transition to show while dragging (the destination page hasn't loaded
+    // yet at that point — WKWebView has no way to peek at it without
+    // navigating). Capped and evicted oldest-first; kept in memory only.
+    private var historySnapshots: [String: UIImage] = [:]
+    private var historySnapshotOrder: [String] = []
+    private let maxHistorySnapshots = 20
 
     private let messageName: String
     private let messageProxy: ScriptMessageProxy
@@ -76,7 +86,7 @@ final class Tab: NSObject {
         // page, not just the screen edge. Leaving both active would double-
         // navigate on edge swipes since they'd both fire for the same drag.
         webView.allowsBackForwardNavigationGestures = false
-        webView.allowsLinkPreview = false
+        webView.allowsLinkPreview = true
         webView.isOpaque = false
         webView.backgroundColor = Theme.background
         webView.scrollView.backgroundColor = Theme.background
@@ -352,11 +362,33 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         CookieGuard.shared.spoofAnalyticsCookies(in: webView.configuration.websiteDataStore.httpCookieStore)
         loadFavicon()
+        captureHistorySnapshot()
         delegate?.tabDidChange(self)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         webView.reload()
+    }
+
+    /// A cached snapshot of `url`, if this tab has visited it before — used
+    /// by the container to show the destination page while a back/forward
+    /// swipe is in progress, before it's actually navigated to.
+    func historySnapshot(for url: URL) -> UIImage? {
+        historySnapshots[url.absoluteString]
+    }
+
+    private func captureHistorySnapshot() {
+        guard let url = webView.url else { return }
+        let key = url.absoluteString
+        webView.takeSnapshot(with: nil) { [weak self] image, _ in
+            guard let self, let image else { return }
+            if self.historySnapshots[key] == nil { self.historySnapshotOrder.append(key) }
+            self.historySnapshots[key] = image
+            if self.historySnapshotOrder.count > self.maxHistorySnapshots {
+                let oldest = self.historySnapshotOrder.removeFirst()
+                self.historySnapshots.removeValue(forKey: oldest)
+            }
+        }
     }
 
     private func loadFavicon() {
@@ -443,6 +475,41 @@ extension Tab: WKUIDelegate {
 
     func webViewDidClose(_ webView: WKWebView) {
         delegate?.tabDidRequestClose(self)
+    }
+
+    /// Customizes the long-press menu on a link: open here, open in a new
+    /// tab, open in a background tab, copy, or share. WebKit still shows its
+    /// own live preview of the destination above this menu.
+    func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
+                completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
+        guard let url = elementInfo.linkURL else {
+            completionHandler(nil)
+            return
+        }
+        let config = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            guard let self else { return nil }
+            return UIMenu(children: [
+                UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in
+                    self?.load(url)
+                },
+                UIAction(title: "Open in New Tab", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in
+                    guard let self else { return }
+                    self.delegate?.tab(self, openInNewTab: url)
+                },
+                UIAction(title: "Open in Background", image: UIImage(systemName: "square.stack")) { [weak self] _ in
+                    guard let self else { return }
+                    self.delegate?.tab(self, openInBackgroundTab: url)
+                },
+                UIAction(title: "Copy Link", image: UIImage(systemName: "doc.on.doc")) { _ in
+                    UIPasteboard.general.url = url
+                },
+                UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+                    guard let self else { return }
+                    self.delegate?.tab(self, share: url)
+                }
+            ])
+        }
+        completionHandler(config)
     }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
