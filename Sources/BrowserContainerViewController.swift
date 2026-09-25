@@ -406,8 +406,8 @@ final class BrowserContainerViewController: UIViewController {
         let overlap = max(0, view.bounds.maxY - endFrameInView.minY)
         let bottomInset = view.safeAreaInsets.bottom
         let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        let curveRaw = (userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt) ?? UIView.AnimationCurve.easeInOut.rawValue
-        let curve = UIView.AnimationCurve(rawValue: Int(curveRaw)) ?? .easeInOut
+        let curveRaw = (userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? UIView.AnimationCurve.easeInOut.rawValue
+        let curve = UIView.AnimationCurve(rawValue: curveRaw) ?? .easeInOut
 
         addressBarBottom.constant = overlap > 0 ? -(overlap - bottomInset) : 0
         let animator = UIViewPropertyAnimator(duration: duration, curve: curve) { [weak self] in
