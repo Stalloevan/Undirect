@@ -114,7 +114,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            toggleButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 2),
+            toggleButton.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             toggleButton.centerXAnchor.constraint(equalTo: centerXAnchor, constant: 0),
             toggleButton.widthAnchor.constraint(equalToConstant: Self.collapsedWidth),
             toggleButton.heightAnchor.constraint(equalToConstant: 34),
@@ -153,7 +153,6 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         tableView.isHidden = !expanded
         toggleButton.setImage(UIImage(systemName: expanded ? "sidebar.leading" : "sidebar.left"), for: .normal)
         toggleButton.accessibilityLabel = expanded ? "Collapse tabs" : "Show all tabs"
-        if expanded { tableView.reloadData() }
         layoutRows()
     }
 
@@ -173,7 +172,6 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
     }
 
     private func layoutRows() {
-        let previousCount = rows.count
         var newRows: [Row] = []
         for i in items.indices {
             newRows.append(.tab(i))
@@ -183,14 +181,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         rows = newRows
 
         guard isExpanded else { return }
-        if rows.count != previousCount {
-            tableView.reloadData()
-        } else {
-            for cell in tableView.visibleCells {
-                guard let ip = tableView.indexPath(for: cell) else { continue }
-                configure(cell, at: ip.row)
-            }
-        }
+        tableView.reloadData()
         if let selected = selectedTabIndex, let rowIndex = rows.firstIndex(of: .tab(selected)) {
             let ip = IndexPath(row: rowIndex, section: 0)
             if !(tableView.indexPathsForVisibleRows ?? []).contains(ip) {

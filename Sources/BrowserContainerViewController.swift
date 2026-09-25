@@ -174,7 +174,7 @@ final class BrowserContainerViewController: UIViewController {
             progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             progressView.heightAnchor.constraint(equalToConstant: 2),
 
-            sidebar.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebar.topAnchor.constraint(equalTo: safe.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: addressBar.topAnchor),
 
             contentView.topAnchor.constraint(equalTo: view.topAnchor),
