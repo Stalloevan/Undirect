@@ -10,6 +10,7 @@ final class BrowserContainerViewController: UIViewController {
     // Chrome — address bar lives at the bottom; back/forward are swipe-only
     // (WKWebView's own edge-swipe gesture, always on).
     private let addressBar = UIView()
+    private let addressBarBackdrop = UIView()
     private let addressField = UITextField()
     private let addressIcon = UIImageView()
     private let reloadButton = UIButton(type: .system)
@@ -17,10 +18,15 @@ final class BrowserContainerViewController: UIViewController {
     private let progressView = UIProgressView(progressViewStyle: .bar)
     private let sidebar = TabSidebarView()
     private var sidebarWidth: NSLayoutConstraint!
+    private let pulloutHandle = PulloutHandleView()
+    private var pulloutLeading: NSLayoutConstraint!
+    private var pulloutTrailing: NSLayoutConstraint!
     private let contentView = UIView()
     private let ntp = NewTabPageViewController()
     private let torOverlay = TorConnectingView()
     private let pickerBanner = PickerBanner()
+
+    private var sidebarState: SidebarState = Settings.shared.sidebarState
 
     // Layout constraints that swap when the sidebar moves sides.
     private var sidebarLeading: NSLayoutConstraint!
@@ -89,6 +95,7 @@ final class BrowserContainerViewController: UIViewController {
 
     private func buildChrome() {
         addressBar.backgroundColor = Theme.bar
+        addressBarBackdrop.backgroundColor = Theme.bar
         let fieldBackground = UIView()
         fieldBackground.backgroundColor = Theme.field
         fieldBackground.layer.cornerRadius = 11
@@ -127,7 +134,7 @@ final class BrowserContainerViewController: UIViewController {
         contentView.backgroundColor = Theme.background
         contentView.clipsToBounds = true
 
-        for v in [contentView, sidebar, addressBar, progressView, pickerBanner] as [UIView] {
+        for v in [contentView, sidebar, addressBarBackdrop, addressBar, progressView, pickerBanner, pulloutHandle] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
@@ -140,13 +147,27 @@ final class BrowserContainerViewController: UIViewController {
 
         let safe = view.safeAreaLayoutGuide
 
-        addressBarBottom = addressBar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        // The bar itself has a FIXED height and only its bottom anchor moves —
+        // that's what lets it translate as one unit above the keyboard. (An
+        // earlier version also pinned its top to a fixed position, which meant
+        // moving the bottom only squashed the bar's height instead of sliding
+        // it — the visible controls, anchored to that fixed top, never moved
+        // and stayed hidden under the keyboard.)
+        // A static, non-animating backdrop of the same color sits behind it so
+        // the bar's usual background still reaches the true screen bottom
+        // (behind the home indicator) when the bar itself is at rest.
+        addressBarBottom = addressBar.bottomAnchor.constraint(equalTo: safe.bottomAnchor)
         addressBarBottom.isActive = true
 
         NSLayoutConstraint.activate([
             addressBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             addressBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            addressBar.topAnchor.constraint(equalTo: safe.bottomAnchor, constant: -50),
+            addressBar.heightAnchor.constraint(equalToConstant: 50),
+
+            addressBarBackdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            addressBarBackdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            addressBarBackdrop.topAnchor.constraint(equalTo: safe.bottomAnchor),
+            addressBarBackdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             fieldBackground.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 10),
             fieldBackground.trailingAnchor.constraint(equalTo: pageMenuButton.leadingAnchor, constant: -6),
@@ -189,7 +210,20 @@ final class BrowserContainerViewController: UIViewController {
             pickerBanner.bottomAnchor.constraint(equalTo: addressBar.topAnchor, constant: -10)
         ])
 
-        sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: TabSidebarView.collapsedWidth)
+        NSLayoutConstraint.activate([
+            pulloutHandle.topAnchor.constraint(equalTo: safe.topAnchor, constant: 70),
+            pulloutHandle.widthAnchor.constraint(equalToConstant: 40),
+            pulloutHandle.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        pulloutLeading = pulloutHandle.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        pulloutTrailing = pulloutHandle.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        pulloutHandle.onActivate = { [weak self] in self?.advanceSidebarState(animated: true) }
+        pulloutHandle.menuProvider = { [weak self] in
+            guard let self else { return nil }
+            return self.tabMenu(for: self.selectedIndex)
+        }
+
+        sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: TabSidebarView.minimalWidth)
         sidebarWidth.isActive = true
 
         sidebarLeading = sidebar.leadingAnchor.constraint(equalTo: safe.leadingAnchor)
@@ -199,8 +233,8 @@ final class BrowserContainerViewController: UIViewController {
         contentTrailingFromSidebar = contentView.trailingAnchor.constraint(equalTo: sidebar.leadingAnchor)
         contentTrailingFromSafe = contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
 
-        setSidebarExpanded(Settings.shared.sidebarExpanded, animated: false)
         applySidebarPosition()
+        setSidebarState(Settings.shared.sidebarState, animated: false)
     }
 
     private func applySidebarPosition() {
@@ -209,22 +243,43 @@ final class BrowserContainerViewController: UIViewController {
         lastAppliedSidebarPosition = position
 
         NSLayoutConstraint.deactivate([sidebarLeading, sidebarTrailing, contentLeadingFromSidebar,
-                                       contentLeadingFromSafe, contentTrailingFromSidebar, contentTrailingFromSafe])
+                                       contentLeadingFromSafe, contentTrailingFromSidebar, contentTrailingFromSafe,
+                                       pulloutLeading, pulloutTrailing])
         if position == .leading {
-            NSLayoutConstraint.activate([sidebarLeading, contentLeadingFromSidebar, contentTrailingFromSafe])
+            NSLayoutConstraint.activate([sidebarLeading, contentLeadingFromSidebar, contentTrailingFromSafe, pulloutLeading])
         } else {
-            NSLayoutConstraint.activate([sidebarTrailing, contentTrailingFromSidebar, contentLeadingFromSafe])
+            NSLayoutConstraint.activate([sidebarTrailing, contentTrailingFromSidebar, contentLeadingFromSafe, pulloutTrailing])
         }
+        pulloutHandle.setEdge(position)
     }
 
-    private func setSidebarExpanded(_ expanded: Bool, animated: Bool) {
-        Settings.shared.sidebarExpanded = expanded
-        sidebarWidth.constant = expanded ? TabSidebarView.expandedWidth : TabSidebarView.collapsedWidth
-        sidebar.setExpanded(expanded)
+    /// hidden: sidebar reserves no width at all (content gets the full screen);
+    /// a small floating handle overlays the edge as the only way back in.
+    /// minimal: a narrow column of every tab's icon.
+    /// full: the same column with titles and close buttons.
+    private func setSidebarState(_ state: SidebarState, animated: Bool) {
+        sidebarState = state
+        Settings.shared.sidebarState = state
+
+        sidebar.isHidden = state == .hidden
+        pulloutHandle.isHidden = state != .hidden
+        sidebarWidth.constant = state == .full ? TabSidebarView.fullWidth : state == .minimal ? TabSidebarView.minimalWidth : 0
+        if state != .hidden { sidebar.setMode(state == .full ? .full : .minimal) }
         refreshSidebar()
+
         if animated {
             UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseOut) { self.view.layoutIfNeeded() }
         }
+    }
+
+    private func advanceSidebarState(animated: Bool) {
+        let next: SidebarState
+        switch sidebarState {
+        case .hidden: next = .minimal
+        case .minimal: next = .full
+        case .full: next = .hidden
+        }
+        setSidebarState(next, animated: animated)
     }
 
     // MARK: Tabs
@@ -381,6 +436,9 @@ final class BrowserContainerViewController: UIViewController {
             SidebarItem(icon: tab.icon, title: tab.title, isTor: tab.isTor,
                         isSelected: index == selectedIndex, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
         })
+        if let tab = currentTab {
+            pulloutHandle.configure(icon: tab.icon, isTor: tab.isTor, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
+        }
     }
 
     @objc private func rulesUpdated() {
@@ -621,8 +679,8 @@ extension BrowserContainerViewController: UITextFieldDelegate {
 extension BrowserContainerViewController: TabSidebarDelegate {
     func sidebarDidSelect(index: Int) {
         select(index: index)
-        if sidebar.isExpanded && traitCollection.horizontalSizeClass == .compact {
-            setSidebarExpanded(false, animated: true)
+        if sidebarState == .full && traitCollection.horizontalSizeClass == .compact {
+            setSidebarState(.minimal, animated: true)
         }
     }
 
@@ -635,8 +693,8 @@ extension BrowserContainerViewController: TabSidebarDelegate {
         openTab(url: nil, tor: tor)
     }
 
-    func sidebarDidToggleExpanded() {
-        setSidebarExpanded(!sidebar.isExpanded, animated: true)
+    func sidebarDidRequestAdvanceState() {
+        advanceSidebarState(animated: true)
     }
 
     func sidebarMenu(for index: Int) -> UIMenu? {
@@ -736,6 +794,80 @@ final class TorConnectingView: UIView {
         default:
             label.text = "Connecting to Tor…"
         }
+    }
+}
+
+/// The only visible sidebar control in the "hidden" state: a small handle
+/// docked to whichever edge the tab bar belongs on, showing the current tab's
+/// icon. Tapping or swiping it away from the edge reveals the tab bar; the
+/// tab bar itself reserves no width while this is showing, so the page gets
+/// the full screen.
+final class PulloutHandleView: UIView {
+    var onActivate: (() -> Void)?
+    var menuProvider: (() -> UIMenu?)?
+
+    private let iconView = UIImageView()
+    private let ring = UIView()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let swipeGesture = UISwipeGestureRecognizer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = Theme.bar
+        layer.cornerRadius = 10
+
+        iconView.contentMode = .scaleAspectFill
+        iconView.layer.cornerRadius = 7
+        iconView.clipsToBounds = true
+        ring.layer.cornerRadius = 9
+        ring.layer.borderWidth = 2
+        ring.layer.borderColor = Theme.tor.cgColor
+        spinner.color = Theme.secondaryText
+        spinner.hidesWhenStopped = true
+
+        for v in [iconView, ring, spinner] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 24),
+            iconView.heightAnchor.constraint(equalToConstant: 24),
+            ring.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
+            ring.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
+            ring.widthAnchor.constraint(equalToConstant: 30),
+            ring.heightAnchor.constraint(equalToConstant: 30),
+            spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor)
+        ])
+
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap)))
+        swipeGesture.addTarget(self, action: #selector(handleTap))
+        addGestureRecognizer(swipeGesture)
+        addInteraction(UIContextMenuInteraction(delegate: self))
+        accessibilityLabel = "Show tabs"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func handleTap() { onActivate?() }
+
+    func setEdge(_ position: SidebarPosition) {
+        swipeGesture.direction = position == .leading ? .right : .left
+    }
+
+    func configure(icon: UIImage, isTor: Bool, isLoading: Bool) {
+        iconView.image = icon
+        ring.isHidden = !isTor
+        iconView.alpha = isLoading ? 0.35 : 1
+        if isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
+    }
+}
+
+extension PulloutHandleView: UIContextMenuInteractionDelegate {
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in self?.menuProvider?() }
     }
 }
 

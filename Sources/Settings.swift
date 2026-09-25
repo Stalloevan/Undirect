@@ -55,6 +55,10 @@ enum CookieCleanupMode: String, CaseIterable {
     }
 }
 
+enum SidebarState: String, CaseIterable {
+    case hidden, minimal, full
+}
+
 enum SidebarPosition: String, CaseIterable {
     case leading, trailing
     var title: String { self == .leading ? "Left" : "Right" }
@@ -124,9 +128,9 @@ final class Settings {
         get { bool("s.preload", true) }
         set { set(newValue, "s.preload") }
     }
-    var sidebarExpanded: Bool {
-        get { bool("s.sidebarExpanded", false) }
-        set { defaults.set(newValue, forKey: "s.sidebarExpanded") }
+    var sidebarState: SidebarState {
+        get { SidebarState(rawValue: defaults.string(forKey: "s.sidebarState") ?? "") ?? .minimal }
+        set { defaults.set(newValue.rawValue, forKey: "s.sidebarState") }
     }
     var sidebarPosition: SidebarPosition {
         get { SidebarPosition(rawValue: defaults.string(forKey: "s.sidebarPosition") ?? "") ?? .leading }

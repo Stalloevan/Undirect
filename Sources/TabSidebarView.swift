@@ -5,7 +5,8 @@ protocol TabSidebarDelegate: AnyObject {
     func sidebarDidClose(index: Int)
     /// nil means "use the default (Settings.shared.torForNewTabs)".
     func sidebarDidRequestNewTab(tor: Bool?)
-    func sidebarDidToggleExpanded()
+    /// Cycles hidden → minimal → full → hidden.
+    func sidebarDidRequestAdvanceState()
     func sidebarMenu(for index: Int) -> UIMenu?
 }
 
@@ -17,35 +18,33 @@ struct SidebarItem {
     let isLoading: Bool
 }
 
+enum SidebarDisplayMode {
+    /// A narrow column of icons only, no titles — every open tab, just compact.
+    case minimal
+    /// Full-width rows with titles and a close button.
+    case full
+}
+
 private enum Row: Equatable {
     case tab(Int)
     case addTab
 }
 
-/// Collapsed: a single icon for the current tab, with an add-tab button
-/// directly beneath it — not a column of every open tab.
-/// Expanded: the full tab list, with the add-tab row inserted right after
-/// whichever tab is active (not pinned to the bottom).
+/// The visible tab list, in one of two densities (the third, fully-hidden
+/// state is handled outside this view — see BrowserContainerViewController's
+/// floating pullout handle). The add-tab row sits right after the active
+/// tab's row rather than pinned to the bottom.
 final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 
-    static let collapsedWidth: CGFloat = 52
-    static let expandedWidth: CGFloat = 250
+    static let minimalWidth: CGFloat = 52
+    static let fullWidth: CGFloat = 250
 
     weak var delegate: TabSidebarDelegate?
-    private(set) var isExpanded = false
+    private(set) var mode: SidebarDisplayMode = .minimal
 
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let divider = UIView()
     private let toggleButton = UIButton(type: .system)
-
-    // Collapsed-mode controls
-    private let collapsedStack = UIStackView()
-    private let currentTabButton = UIButton(type: .system)
-    private let currentTabIcon = UIImageView()
-    private let currentTabSpinner = UIActivityIndicatorView(style: .medium)
-    private let collapsedAddButton = UIButton(type: .system)
-    private var currentTabInteraction: UIContextMenuInteraction?
-    private let expandSwipe = UISwipeGestureRecognizer()
 
     private var items: [SidebarItem] = []
     private var rows: [Row] = []
@@ -56,50 +55,8 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         backgroundColor = Theme.bar
         clipsToBounds = false
 
-        toggleButton.setImage(UIImage(systemName: "sidebar.left"), for: .normal)
         toggleButton.tintColor = Theme.secondaryText
-        toggleButton.accessibilityLabel = "Show all tabs"
-        toggleButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidToggleExpanded() }, for: .touchUpInside)
-
-        // Collapsed: current-tab icon (tap to expand, long-press for actions), add button below.
-        currentTabIcon.contentMode = .scaleAspectFill
-        currentTabIcon.layer.cornerRadius = 8
-        currentTabIcon.clipsToBounds = true
-        currentTabSpinner.color = Theme.secondaryText
-        currentTabSpinner.hidesWhenStopped = true
-        currentTabButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidToggleExpanded() }, for: .touchUpInside)
-        currentTabButton.accessibilityLabel = "Current tab — swipe or tap to show all tabs"
-        currentTabButton.addGestureRecognizer(expandSwipe)
-        expandSwipe.addTarget(self, action: #selector(handleExpandSwipe))
-        let interaction = UIContextMenuInteraction(delegate: self)
-        currentTabButton.addInteraction(interaction)
-        currentTabInteraction = interaction
-
-        collapsedAddButton.setImage(UIImage(systemName: "plus"), for: .normal)
-        collapsedAddButton.tintColor = Theme.accent
-        collapsedAddButton.accessibilityLabel = "New tab"
-        collapsedAddButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidRequestNewTab(tor: nil) }, for: .touchUpInside)
-        collapsedAddButton.menu = newTabMenu()
-        collapsedAddButton.showsMenuAsPrimaryAction = false
-
-        collapsedStack.axis = .vertical
-        collapsedStack.alignment = .center
-        collapsedStack.spacing = 6
-
-        for v in [currentTabIcon, currentTabSpinner] { v.translatesAutoresizingMaskIntoConstraints = false; currentTabButton.addSubview(v) }
-        NSLayoutConstraint.activate([
-            currentTabIcon.centerXAnchor.constraint(equalTo: currentTabButton.centerXAnchor),
-            currentTabIcon.centerYAnchor.constraint(equalTo: currentTabButton.centerYAnchor),
-            currentTabIcon.widthAnchor.constraint(equalToConstant: 30),
-            currentTabIcon.heightAnchor.constraint(equalToConstant: 30),
-            currentTabSpinner.centerXAnchor.constraint(equalTo: currentTabIcon.centerXAnchor),
-            currentTabSpinner.centerYAnchor.constraint(equalTo: currentTabIcon.centerYAnchor)
-        ])
-        currentTabButton.translatesAutoresizingMaskIntoConstraints = false
-        currentTabButton.widthAnchor.constraint(equalToConstant: Self.collapsedWidth).isActive = true
-        currentTabButton.heightAnchor.constraint(equalToConstant: Self.collapsedWidth).isActive = true
-        collapsedStack.addArrangedSubview(currentTabButton)
-        collapsedStack.addArrangedSubview(collapsedAddButton)
+        toggleButton.addAction(UIAction { [weak self] _ in self?.delegate?.sidebarDidRequestAdvanceState() }, for: .touchUpInside)
 
         tableView.backgroundColor = .clear
         tableView.separatorStyle = .none
@@ -112,18 +69,15 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 
         divider.backgroundColor = UIColor(white: 1, alpha: 0.06)
 
-        for v in [toggleButton, collapsedStack, tableView, divider] {
+        for v in [toggleButton, tableView, divider] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
             toggleButton.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-            toggleButton.centerXAnchor.constraint(equalTo: centerXAnchor, constant: 0),
-            toggleButton.widthAnchor.constraint(equalToConstant: Self.collapsedWidth),
+            toggleButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+            toggleButton.widthAnchor.constraint(equalToConstant: Self.minimalWidth),
             toggleButton.heightAnchor.constraint(equalToConstant: 34),
-
-            collapsedStack.topAnchor.constraint(equalTo: toggleButton.bottomAnchor, constant: 4),
-            collapsedStack.centerXAnchor.constraint(equalTo: centerXAnchor),
 
             tableView.topAnchor.constraint(equalTo: toggleButton.bottomAnchor, constant: 2),
             tableView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -136,58 +90,25 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
             divider.widthAnchor.constraint(equalToConstant: 1)
         ])
 
-        refreshSwipeDirection()
-        NotificationCenter.default.addObserver(self, selector: #selector(refreshSwipeDirection), name: Settings.didChange, object: nil)
+        updateToggleIcon()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
-
-    @objc private func handleExpandSwipe() {
-        guard !isExpanded else { return }
-        delegate?.sidebarDidToggleExpanded()
+    private func updateToggleIcon() {
+        toggleButton.setImage(UIImage(systemName: mode == .full ? "sidebar.leading" : "sidebar.left"), for: .normal)
+        toggleButton.accessibilityLabel = mode == .full ? "Show fewer tab details" : "Show tab names"
     }
 
-    /// The "swipe out to reveal" direction depends on which edge the bar is
-    /// docked to — swiping away from that edge, toward the content, expands it.
-    @objc private func refreshSwipeDirection() {
-        expandSwipe.direction = Settings.shared.sidebarPosition == .leading ? .right : .left
-    }
-
-    private func newTabMenu() -> UIMenu {
-        UIMenu(children: [
-            UIAction(title: "New Tab", image: UIImage(systemName: "plus.square")) { [weak self] _ in
-                self?.delegate?.sidebarDidRequestNewTab(tor: false)
-            },
-            UIAction(title: "New Tor Tab", image: OnionIcon.image(pointSize: 18)) { [weak self] _ in
-                self?.delegate?.sidebarDidRequestNewTab(tor: true)
-            }
-        ])
-    }
-
-    func setExpanded(_ expanded: Bool) {
-        isExpanded = expanded
-        collapsedStack.isHidden = expanded
-        tableView.isHidden = !expanded
-        toggleButton.setImage(UIImage(systemName: expanded ? "sidebar.leading" : "sidebar.left"), for: .normal)
-        toggleButton.accessibilityLabel = expanded ? "Collapse tabs" : "Show all tabs"
-        layoutRows()
+    func setMode(_ mode: SidebarDisplayMode) {
+        self.mode = mode
+        updateToggleIcon()
+        tableView.reloadData()
     }
 
     func update(items: [SidebarItem]) {
         self.items = items
         layoutRows()
-
-        // Collapsed-mode current tab display.
-        if let tab = items.first(where: \.isSelected) {
-            currentTabIcon.image = tab.icon
-            currentTabIcon.layer.borderWidth = tab.isTor ? 2 : 0
-            currentTabIcon.layer.borderColor = Theme.tor.cgColor
-            currentTabIcon.alpha = tab.isLoading ? 0.35 : 1
-            if tab.isLoading { currentTabSpinner.startAnimating() } else { currentTabSpinner.stopAnimating() }
-            currentTabButton.accessibilityLabel = (tab.isTor ? "Tor tab: " : "Tab: ") + tab.title
-        }
     }
 
     private func layoutRows() {
@@ -199,7 +120,6 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         if selectedTabIndex == nil { newRows.append(.addTab) }
         rows = newRows
 
-        guard isExpanded else { return }
         tableView.reloadData()
         if let selected = selectedTabIndex, let rowIndex = rows.firstIndex(of: .tab(selected)) {
             let ip = IndexPath(row: rowIndex, section: 0)
@@ -213,10 +133,12 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         switch rows[row] {
         case .tab(let index):
             guard let cell = cell as? TabCell, items.indices.contains(index) else { return }
-            cell.configure(item: items[index])
+            cell.configure(item: items[index], compact: mode == .minimal)
             cell.onClose = { [weak self] in self?.delegate?.sidebarDidClose(index: index) }
         case .addTab:
-            (cell as? AddTabCell)?.onTap = { [weak self] in self?.delegate?.sidebarDidRequestNewTab(tor: nil) }
+            guard let cell = cell as? AddTabCell else { return }
+            cell.configure(compact: mode == .minimal)
+            cell.onTap = { [weak self] in self?.delegate?.sidebarDidRequestNewTab(tor: nil) }
         }
     }
 
@@ -252,13 +174,6 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard case .tab(let index) = rows[indexPath.row] else { return nil }
-        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in self?.delegate?.sidebarMenu(for: index) }
-    }
-}
-
-extension TabSidebarView: UIContextMenuInteractionDelegate {
-    func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
-        guard let index = selectedTabIndex else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in self?.delegate?.sidebarMenu(for: index) }
     }
 }
@@ -304,7 +219,7 @@ private final class TabCell: UITableViewCell {
             highlight.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 3),
             highlight.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -3),
 
-            iconView.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.collapsedWidth / 2),
+            iconView.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.minimalWidth / 2),
             iconView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 26),
             iconView.heightAnchor.constraint(equalToConstant: 26),
@@ -317,7 +232,7 @@ private final class TabCell: UITableViewCell {
             spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
 
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.collapsedWidth),
+            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.minimalWidth),
             titleLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -4),
 
@@ -330,13 +245,15 @@ private final class TabCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(item: SidebarItem) {
+    func configure(item: SidebarItem, compact: Bool) {
         iconView.image = item.icon
         iconView.alpha = item.isLoading ? 0.35 : 1
         if item.isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
         ring.isHidden = !item.isTor
         highlight.backgroundColor = item.isSelected ? Theme.field : .clear
         titleLabel.text = item.title
+        titleLabel.isHidden = compact
+        closeButton.isHidden = compact
         accessibilityLabel = (item.isTor ? "Tor tab: " : "Tab: ") + item.title
     }
 }
@@ -351,14 +268,7 @@ private final class AddTabCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear
         selectionStyle = .none
-        var config = UIButton.Configuration.plain()
-        config.title = "New Tab"
-        config.image = UIImage(systemName: "plus")
-        config.imagePadding = 10
-        config.baseForegroundColor = Theme.accent
-        config.contentInsets = .init(top: 0, leading: TabSidebarView.collapsedWidth - 22, bottom: 0, trailing: 0)
-        config.titleAlignment = .leading
-        button.configuration = config
+        button.tintColor = Theme.accent
         button.contentHorizontalAlignment = .leading
         button.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(button)
@@ -370,4 +280,19 @@ private final class AddTabCell: UITableViewCell {
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    func configure(compact: Bool) {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "plus")
+        config.baseForegroundColor = Theme.accent
+        if compact {
+            config.contentInsets = .init(top: 0, leading: (TabSidebarView.minimalWidth - 22) / 2, bottom: 0, trailing: 0)
+        } else {
+            config.title = "New Tab"
+            config.imagePadding = 10
+            config.contentInsets = .init(top: 0, leading: TabSidebarView.minimalWidth - 22, bottom: 0, trailing: 0)
+            config.titleAlignment = .leading
+        }
+        button.configuration = config
+    }
 }
