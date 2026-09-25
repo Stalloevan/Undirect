@@ -166,9 +166,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 // MARK: - Cells
 
 private final class TabCell: UITableViewCell {
-    private let highlight = UIView()
     private let iconView = UIImageView()
-    private let ring = UIView()
     private let titleLabel = UILabel()
     private let closeButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -178,14 +176,12 @@ private final class TabCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear
         selectionStyle = .none
+        contentView.layer.cornerRadius = Theme.cornerRadius
+        contentView.clipsToBounds = true
 
-        highlight.layer.cornerRadius = Theme.cornerRadius
         iconView.layer.cornerRadius = Theme.smallCornerRadius
         iconView.clipsToBounds = true
         iconView.contentMode = .scaleAspectFill
-        ring.layer.cornerRadius = Theme.smallCornerRadius + 2
-        ring.layer.borderWidth = 2
-        ring.layer.borderColor = Theme.tor.cgColor
         titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
         titleLabel.textColor = Theme.text
         closeButton.setImage(Theme.icon("xmark"), for: .normal)
@@ -199,25 +195,15 @@ private final class TabCell: UITableViewCell {
         contentView.addGestureRecognizer(doubleTap)
         accessibilityHint = "Double-tap to close"
 
-        for v in [highlight, ring, iconView, titleLabel, closeButton, spinner] {
+        for v in [iconView, titleLabel, closeButton, spinner] {
             v.translatesAutoresizingMaskIntoConstraints = false
             contentView.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            highlight.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 5),
-            highlight.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5),
-            highlight.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 3),
-            highlight.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -3),
-
             iconView.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.minimalWidth / 2),
             iconView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 26),
             iconView.heightAnchor.constraint(equalToConstant: 26),
-
-            ring.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
-            ring.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
-            ring.widthAnchor.constraint(equalToConstant: 32),
-            ring.heightAnchor.constraint(equalToConstant: 32),
 
             spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
@@ -241,20 +227,21 @@ private final class TabCell: UITableViewCell {
         iconView.image = item.icon
         iconView.alpha = item.isLoading ? 0.35 : 1
         if item.isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
-        ring.isHidden = !item.isTor
+        iconView.layer.borderWidth = item.isTor ? 2 : 0
+        iconView.layer.borderColor = Theme.tor.cgColor
         titleLabel.text = item.title
         titleLabel.isHidden = compact
         closeButton.isHidden = compact
         accessibilityLabel = (item.isTor ? "Tor tab: " : "Tab: ") + item.title
 
-        let edge = item.icon.edgeAverageColor()
-        highlight.backgroundColor = edge.withAlphaComponent(item.isSelected ? 0.45 : 0.16)
-        Theme.applyBlockShadow(to: highlight)
+        let edge = item.icon.edgeColor()
+        contentView.backgroundColor = edge.withAlphaComponent(item.isSelected ? 0.45 : 0.16)
+        Theme.applyBlockShadow(to: contentView)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        Theme.applyBlockShadow(to: highlight)
+        Theme.applyBlockShadow(to: contentView)
     }
 }
 

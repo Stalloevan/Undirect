@@ -157,8 +157,12 @@ extension UIImage {
     /// The average color of this image's outer border pixels — used to bleed
     /// a favicon's own edge color out to fill its tab/row, rather than the
     /// icon sitting on a flat, unrelated background.
-    func edgeAverageColor() -> UIColor {
-        let side = 10
+    /// The last non-transparent pixel found while tracing the image's outer
+    /// border (clockwise from the top-left) — a real, specific pixel color
+    /// rather than a blend of every border pixel, which tended to wash out
+    /// into a muddy average that didn't match anything actually in the icon.
+    func edgeColor() -> UIColor {
+        let side = 12
         guard let cgImage = cgImage else { return Theme.field }
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         var pixels = [UInt8](repeating: 0, count: side * side * 4)
@@ -168,21 +172,23 @@ extension UIImage {
         ctx.interpolationQuality = .medium
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
 
-        var rSum = 0.0, gSum = 0.0, bSum = 0.0, aSum = 0.0
-        for y in 0..<side {
-            for x in 0..<side {
-                guard x == 0 || y == 0 || x == side - 1 || y == side - 1 else { continue }
-                let o = (y * side + x) * 4
-                let a = Double(pixels[o + 3]) / 255.0
-                guard a > 0.05 else { continue }
-                rSum += Double(pixels[o]) / 255.0 * a
-                gSum += Double(pixels[o + 1]) / 255.0 * a
-                bSum += Double(pixels[o + 2]) / 255.0 * a
-                aSum += a
-            }
+        var perimeter: [(Int, Int)] = []
+        for x in 0..<side { perimeter.append((x, 0)) }
+        for y in 1..<side { perimeter.append((side - 1, y)) }
+        for x in stride(from: side - 2, through: 0, by: -1) { perimeter.append((x, side - 1)) }
+        for y in stride(from: side - 2, through: 1, by: -1) { perimeter.append((0, y)) }
+
+        var last: UIColor?
+        for (x, y) in perimeter {
+            let o = (y * side + x) * 4
+            let a = Double(pixels[o + 3]) / 255.0
+            guard a > 0.2 else { continue }
+            let r = min(1, Double(pixels[o]) / 255.0 / a)
+            let g = min(1, Double(pixels[o + 1]) / 255.0 / a)
+            let b = min(1, Double(pixels[o + 2]) / 255.0 / a)
+            last = UIColor(red: r, green: g, blue: b, alpha: 1)
         }
-        guard aSum > 0 else { return Theme.field }
-        return UIColor(red: rSum / aSum, green: gSum / aSum, blue: bSum / aSum, alpha: 1)
+        return last ?? Theme.field
     }
 }
 

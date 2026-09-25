@@ -4,9 +4,11 @@ import WebKit
 enum SwipeNavDirection { case back, forward }
 
 /// Live state for an in-progress interactive back/forward swipe.
+/// `item` is nil for a back-swipe with no more history — that returns the
+/// tab to a blank New Tab Page instead of doing nothing.
 struct SwipeNavState {
     let direction: SwipeNavDirection
-    let item: WKBackForwardListItem
+    let item: WKBackForwardListItem?
     let tab: Tab
     let outgoing: UIView
     let incoming: UIView
@@ -347,10 +349,16 @@ final class BrowserContainerViewController: UIViewController {
             guard abs(translation.x) > 12, abs(translation.x) > abs(translation.y) * 1.5,
                   let tab = currentTab, !tab.isBlank else { return }
             let direction: SwipeNavDirection = translation.x > 0 ? .back : .forward
-            let item = direction == .back ? tab.webView.backForwardList.backItem : tab.webView.backForwardList.forwardItem
-            let canGo = direction == .back ? tab.webView.canGoBack : tab.webView.canGoForward
-            guard canGo, let item else { return }
-            beginSwipeNavigation(direction: direction, item: item, tab: tab)
+            if direction == .back {
+                if tab.webView.canGoBack, let item = tab.webView.backForwardList.backItem {
+                    beginSwipeNavigation(direction: .back, item: item, tab: tab)
+                } else {
+                    beginReturnToNewTabSwipe(tab: tab)
+                }
+            } else {
+                guard tab.webView.canGoForward, let item = tab.webView.backForwardList.forwardItem else { return }
+                beginSwipeNavigation(direction: .forward, item: item, tab: tab)
+            }
         }
         guard let nav = swipeNav else { return }
 
@@ -392,6 +400,36 @@ final class BrowserContainerViewController: UIViewController {
         swipeNav = SwipeNavState(direction: direction, item: item, tab: tab, outgoing: outgoing, incoming: incoming, container: container)
     }
 
+    /// Swiping back past the start of a tab's history returns it to a blank
+    /// New Tab Page rather than being a dead end.
+    private func beginReturnToNewTabSwipe(tab: Tab) {
+        let bounds = contentView.bounds
+        let container = UIView(frame: bounds)
+        container.clipsToBounds = true
+        container.isUserInteractionEnabled = false
+        contentView.addSubview(container)
+
+        let outgoing = tab.webView.snapshotView(afterScreenUpdates: false) ?? UIView(frame: bounds)
+        outgoing.frame = bounds
+        container.addSubview(outgoing)
+
+        let incoming = UIView(frame: bounds)
+        incoming.backgroundColor = Theme.background
+        let label = UILabel()
+        label.text = "New Tab"
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.textColor = Theme.secondaryText
+        label.translatesAutoresizingMaskIntoConstraints = false
+        incoming.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: incoming.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: incoming.centerYAnchor)
+        ])
+        container.insertSubview(incoming, belowSubview: outgoing)
+
+        swipeNav = SwipeNavState(direction: .back, item: nil, tab: tab, outgoing: outgoing, incoming: incoming, container: container)
+    }
+
     private func finishSwipeNavigation(_ gesture: UIPanGestureRecognizer) {
         guard let nav = swipeNav else { return }
         swipeNav = nil
@@ -411,7 +449,12 @@ final class BrowserContainerViewController: UIViewController {
             nav.incoming.transform = CGAffineTransform(translationX: incomingTarget, y: 0)
         }, completion: { _ in
             nav.container.removeFromSuperview()
-            if commit { nav.tab.webView.go(to: nav.item) }
+            guard commit else { return }
+            if let item = nav.item {
+                nav.tab.webView.go(to: item)
+            } else {
+                nav.tab.resetToBlank()
+            }
         })
     }
 
@@ -960,7 +1003,6 @@ final class PulloutHandleView: UIView {
     var menuProvider: (() -> UIMenu?)?
 
     private let iconView = UIImageView()
-    private let ring = UIView()
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let swipeGesture = UISwipeGestureRecognizer()
 
@@ -972,13 +1014,10 @@ final class PulloutHandleView: UIView {
         iconView.contentMode = .scaleAspectFill
         iconView.layer.cornerRadius = Theme.smallCornerRadius
         iconView.clipsToBounds = true
-        ring.layer.cornerRadius = Theme.smallCornerRadius + 2
-        ring.layer.borderWidth = 2
-        ring.layer.borderColor = Theme.tor.cgColor
         spinner.color = Theme.secondaryText
         spinner.hidesWhenStopped = true
 
-        for v in [iconView, ring, spinner] {
+        for v in [iconView, spinner] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -987,10 +1026,6 @@ final class PulloutHandleView: UIView {
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 24),
             iconView.heightAnchor.constraint(equalToConstant: 24),
-            ring.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
-            ring.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
-            ring.widthAnchor.constraint(equalToConstant: 30),
-            ring.heightAnchor.constraint(equalToConstant: 30),
             spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor)
         ])
@@ -1012,10 +1047,11 @@ final class PulloutHandleView: UIView {
 
     func configure(icon: UIImage, isTor: Bool, isLoading: Bool) {
         iconView.image = icon
-        ring.isHidden = !isTor
+        iconView.layer.borderWidth = isTor ? 2 : 0
+        iconView.layer.borderColor = Theme.tor.cgColor
         iconView.alpha = isLoading ? 0.35 : 1
         if isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
-        let edge = icon.edgeAverageColor()
+        let edge = icon.edgeColor()
         backgroundColor = Theme.bar.blended(with: edge, amount: 0.4)
     }
 

@@ -119,7 +119,11 @@ final class Tab: NSObject {
 
     var url: URL? { webView.url ?? pendingURL }
     var host: String? { url?.host }
-    var isBlank: Bool { webView.url == nil && pendingURL == nil && !webView.isLoading }
+    var isBlank: Bool {
+        guard !webView.isLoading, pendingURL == nil else { return false }
+        guard let url = webView.url else { return true }
+        return url.absoluteString == "about:blank"
+    }
     var isWaitingForTor: Bool { pendingURL != nil && isTor && !TorManager.shared.isReady }
 
     var title: String {
@@ -142,6 +146,17 @@ final class Tab: NSObject {
         }
         pendingURL = nil
         webView.load(URLRequest(url: url))
+    }
+
+    /// Used by the "swipe back past the start of history" gesture — resets
+    /// this same tab to a blank New Tab Page rather than doing nothing once
+    /// there's no more history to go back to.
+    func resetToBlank() {
+        expectedURL = nil
+        pendingURL = nil
+        webView.stopLoading()
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
+        delegate?.tabDidChange(self)
     }
 
     func torBecameReady() {

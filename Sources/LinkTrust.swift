@@ -81,6 +81,11 @@ enum TrustScorer {
             reasons.append("On the ad/tracker blocklist")
         }
 
+        for category in SiteReputationIndex.categories(for: host) {
+            score -= category.penalty
+            reasons.append("Listed as \(category.label)")
+        }
+
         if WhitelistStore.shared.isWhitelisted(host: host) {
             score += 15
             reasons.append("You've trusted this site")
