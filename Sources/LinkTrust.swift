@@ -124,10 +124,38 @@ final class LinkPagePreviewLoader: NSObject, WKNavigationDelegate {
     private var timeoutWork: DispatchWorkItem?
     private var settled = false
 
+    /// Tracks resource load failures from the moment the page starts — this
+    /// is what actually catches most blocked ads. Scanning the DOM only
+    /// *after* the page settles (the old approach) systematically undercounts:
+    /// once our own rules block an ad network's loader script, that script
+    /// never runs, so it never gets the chance to inject the `<img>`/
+    /// `<iframe>` we'd have been looking for — the block itself hides the
+    /// evidence. A failed network request still fires the element's own
+    /// `error` event regardless, whether that element was static HTML or
+    /// created dynamically by a (blocked) loader.
+    private static let errorTrackingScript = """
+    (function () {
+      window.__undirectBlockedHosts = [];
+      document.addEventListener('error', function (e) {
+        var t = e.target;
+        if (!t) return;
+        var u = t.currentSrc || t.src || t.href;
+        if (!u || typeof u !== 'string') return;
+        try {
+          var h = new URL(u, location.href).hostname;
+          if (h) window.__undirectBlockedHosts.push(h);
+        } catch (err) {}
+      }, true);
+    })();
+    """
+
     func load(url: URL, isTor: Bool, completion: @escaping (UIImage?, PageSignals?) -> Void) {
         self.completion = completion
         let config = WebEngine.makeConfiguration(tor: isTor)
         ContentBlocker.shared.apply(to: config.userContentController, paused: ContentBlocker.shared.paused.contains(host: url.host))
+        config.userContentController.addUserScript(WKUserScript(
+            source: Self.errorTrackingScript, injectionTime: .atDocumentStart, forMainFrameOnly: false
+        ))
 
         let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: config)
         wv.navigationDelegate = self
@@ -136,14 +164,14 @@ final class LinkPagePreviewLoader: NSObject, WKNavigationDelegate {
 
         let work = DispatchWorkItem { [weak self] in self?.finish() }
         timeoutWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard !settled else { return }
-        // Give the page a brief moment to paint and for late ad/tracker
-        // resources to register before inspecting and snapshotting it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.finish() }
+        // A brief moment for late ad/tracker resources to register — kept
+        // short since a long-press preview isn't held open for long.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.finish() }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish() }
@@ -173,8 +201,8 @@ final class LinkPagePreviewLoader: NSObject, WKNavigationDelegate {
     private func countAdResources(in webView: WKWebView, completion: @escaping (Int) -> Void) {
         let js = """
         (function () {
+          var hosts = (window.__undirectBlockedHosts || []).slice();
           var els = document.querySelectorAll('script[src], img[src], iframe[src]');
-          var hosts = [];
           for (var i = 0; i < els.length; i++) {
             try { hosts.push(new URL(els[i].src, location.href).hostname); } catch (e) {}
           }

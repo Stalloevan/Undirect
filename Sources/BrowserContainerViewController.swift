@@ -1024,8 +1024,8 @@ final class PulloutHandleView: UIView {
         NSLayoutConstraint.activate([
             iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 24),
-            iconView.heightAnchor.constraint(equalToConstant: 24),
+            iconView.widthAnchor.constraint(equalToConstant: 32),
+            iconView.heightAnchor.constraint(equalToConstant: 32),
             spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor)
         ])
@@ -1051,8 +1051,6 @@ final class PulloutHandleView: UIView {
         iconView.layer.borderColor = Theme.tor.cgColor
         iconView.alpha = isLoading ? 0.35 : 1
         if isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
-        let edge = icon.edgeColor()
-        backgroundColor = Theme.bar.blended(with: edge, amount: 0.4)
     }
 
     override func layoutSubviews() {

@@ -170,6 +170,7 @@ private final class TabCell: UITableViewCell {
     private let titleLabel = UILabel()
     private let closeButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
+    private var isSelectedTab = false
     var onClose: (() -> Void)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -202,8 +203,8 @@ private final class TabCell: UITableViewCell {
         NSLayoutConstraint.activate([
             iconView.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: TabSidebarView.minimalWidth / 2),
             iconView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 26),
-            iconView.heightAnchor.constraint(equalToConstant: 26),
+            iconView.widthAnchor.constraint(equalToConstant: 38),
+            iconView.heightAnchor.constraint(equalToConstant: 38),
 
             spinner.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
@@ -234,14 +235,16 @@ private final class TabCell: UITableViewCell {
         closeButton.isHidden = compact
         accessibilityLabel = (item.isTor ? "Tor tab: " : "Tab: ") + item.title
 
-        let edge = item.icon.edgeColor()
-        contentView.backgroundColor = edge.withAlphaComponent(item.isSelected ? 0.45 : 0.16)
-        Theme.applyBlockShadow(to: contentView)
+        // Only the current tab gets any background at all; every other tab
+        // sits flush against the sidebar with no fill of its own.
+        isSelectedTab = item.isSelected
+        contentView.backgroundColor = item.isSelected ? Theme.field : .clear
+        if item.isSelected { Theme.applyBlockShadow(to: contentView) } else { contentView.layer.shadowOpacity = 0 }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        Theme.applyBlockShadow(to: contentView)
+        if isSelectedTab { Theme.applyBlockShadow(to: contentView) } else { contentView.layer.shadowOpacity = 0 }
     }
 }
 

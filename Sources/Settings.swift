@@ -118,12 +118,12 @@ enum Theme {
         }
     }
 
-    /// Everforest (light variant)'s well-known accent colors, used as the
-    /// retro theme's multicolor icon palette.
-    private static let everforestPalette: [UIColor] = [
-        UIColor(red: 0.553, green: 0.631, blue: 0.004, alpha: 1), // green
-        UIColor(red: 0.961, green: 0.490, blue: 0.149, alpha: 1), // orange
-        UIColor(red: 0.208, green: 0.655, blue: 0.486, alpha: 1)  // aqua
+    /// A vibrant, high-contrast "retro arcade" palette (hot pink, golden
+    /// yellow, cyan) for the retro theme's multicolor icons.
+    private static let retroIconPalette: [UIColor] = [
+        UIColor(red: 1.0, green: 0.259, blue: 0.463, alpha: 1),  // hot pink
+        UIColor(red: 1.0, green: 0.784, blue: 0.157, alpha: 1),  // golden yellow
+        UIColor(red: 0.0, green: 0.788, blue: 0.831, alpha: 1)   // cyan
     ]
 
     static func icon(_ name: String, pointSize: CGFloat = 17, weight: UIImage.SymbolWeight = .regular) -> UIImage? {
@@ -136,7 +136,7 @@ enum Theme {
         }
         var config = UIImage.SymbolConfiguration(font: font).applying(UIImage.SymbolConfiguration(weight: weight))
         if Settings.shared.appTheme == .retro95 {
-            config = config.applying(UIImage.SymbolConfiguration(paletteColors: everforestPalette))
+            config = config.applying(UIImage.SymbolConfiguration(paletteColors: retroIconPalette))
         }
         return UIImage(systemName: name, withConfiguration: config)
     }

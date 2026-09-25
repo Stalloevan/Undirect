@@ -32,8 +32,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Undirect
-        CFBundleShortVersionString: "3.3"
-        CFBundleVersion: "18"
+        CFBundleShortVersionString: "3.4"
+        CFBundleVersion: "19"
         CFBundleIconName: AppIcon
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
@@ -49,5 +49,5 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Undirect-Bridging-Header.h
         DEAD_CODE_STRIPPING: "YES"
-        MARKETING_VERSION: "3.3"
-        CURRENT_PROJECT_VERSION: "18"
+        MARKETING_VERSION: "3.4"
+        CURRENT_PROJECT_VERSION: "19"
