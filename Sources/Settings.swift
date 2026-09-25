@@ -93,7 +93,7 @@ final class Settings {
     }
 
     var blocklistLevel: BlocklistLevel {
-        get { BlocklistLevel(rawValue: defaults.string(forKey: "s.blocklist") ?? "") ?? .standard }
+        get { BlocklistLevel(rawValue: defaults.string(forKey: "s.blocklist") ?? "") ?? .strict }
         set { set(newValue.rawValue, "s.blocklist") }
     }
     var cosmeticFiltering: Bool {

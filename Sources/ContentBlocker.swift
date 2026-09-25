@@ -31,7 +31,18 @@ final class ContentBlocker {
         "iframe[src*=\"googlesyndication.com\"]", "[id^=\"taboola-\"]", ".trc_rbox_container",
         ".OUTBRAIN", "[data-widget-id^=\"outbrain\"]", ".ob-widget", "[data-ad-slot]", "[data-ad-unit]",
         "[data-adunit]", ".ad-slot", ".ad-banner", ".advertisement", "amp-ad",
-        "amp-embed[type=\"taboola\"]", "[aria-label=\"Advertisement\"]"
+        "amp-embed[type=\"taboola\"]", "[aria-label=\"Advertisement\"]",
+        // Ad-shaped test/bait elements used by common ad-blocker test pages.
+        ".adbox", ".banner_ads", ".adsbox", ".textads", ".text-ad", ".ad-container", ".ads-container",
+        ".sponsored-content"
+    ]
+
+    /// Path/filename patterns for ad and tracker scripts, matched regardless
+    /// of which domain serves them — catches decoy/bait scripts that ad-
+    /// blocker test pages serve from their own origin (so a domain-only list
+    /// can't see them) as well as first-party-disguised ad loaders.
+    private static let blockedScriptPatterns = [
+        "/pagead\\.js", "/ads\\.js", "/widget/ads\\.", "/ad-loader\\.js", "/ad-manager\\.js"
     ]
 
     private var buildVersion: String {
@@ -83,6 +94,9 @@ final class ContentBlocker {
             }
             if cosmetic {
                 specs.append(("undirect-cosmetic-b\(version)", { Self.cosmeticJSON() }))
+            }
+            if level != .off {
+                specs.append(("undirect-scriptpatterns-b\(version)", { Self.scriptPatternJSON() }))
             }
             if cookies {
                 specs.append(("undirect-3pcookies-b\(version)", { Self.thirdPartyCookieJSON() }))
@@ -176,6 +190,22 @@ final class ContentBlocker {
         ]]
         let data = (try? JSONSerialization.data(withJSONObject: rules)) ?? Data("[]".utf8)
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Blocks by filename/path regardless of domain — catches ad-loader
+    /// scripts served from a site's own origin (which a domain list alone
+    /// can't see) such as the decoy `ads.js` / `pagead.js` ad-blocker test
+    /// pages serve from themselves specifically to check for this.
+    private static func scriptPatternJSON() -> String {
+        var s = "["
+        var first = true
+        for pattern in blockedScriptPatterns {
+            if !first { s += "," }
+            first = false
+            s += "{\"trigger\":{\"url-filter\":\"\(pattern)\"},\"action\":{\"type\":\"block\"}}"
+        }
+        s += "]"
+        return s
     }
 
     private static func thirdPartyCookieJSON() -> String {

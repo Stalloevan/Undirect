@@ -63,13 +63,15 @@ enum WebEngine {
       var selectors = [
         '#onetrust-banner-sdk', '#onetrust-consent-sdk', '.onetrust-pc-dark-filter',
         '#CybotCookiebotDialog', '#CybotCookiebotDialogBodyUnderlay',
-        '.qc-cmp2-container', '.fc-consent-root', '#sp_message_container',
+        '.qc-cmp2-container', '.fc-consent-root', '#sp_message_container', '[class^="sp_message_container"]',
         '.didomi-popup-container', '#didomi-host', '.didomi-consent-popup-backdrop',
         '.osano-cm-window', '.osano-cm-dialog', '.termly-styles-consent-container',
         '#cookiescript_injected', '.cc-window', '.cc-banner', '#cookie-law-info-bar',
         '#cookieConsentContainer', '.cookie-consent', '.cookie-banner', '.cookie-notice',
         '#cookie-notice', '.cookiebar', '#cookiebar', '.truste_box_overlay',
         '#truste-consent-track', '.tp-modal-overlay', '#gdpr-consent-tool-wrapper',
+        '#usercentrics-root', '#usercentrics-cmp-ui', '.uc-banner-overlay',
+        '#consent_blackbar', '#axeptio_overlay', '.axeptio_widget',
         '[class*="cookie-consent" i]', '[id*="cookie-consent" i]', '[class*="cookiebanner" i]',
         '[aria-label*="cookie" i][role="dialog"]'
       ];
@@ -89,15 +91,62 @@ enum WebEngine {
         } catch (e) {}
         try { if (window.__cmp) window.__cmp('setConsent', null, function () {}, false); } catch (e) {}
         try { if (window.Osano && Osano.cm && Osano.cm.denyAll) Osano.cm.denyAll(); } catch (e) {}
+        try { if (window.UC_UI && UC_UI.rejectAllConsents) UC_UI.rejectAllConsents(); } catch (e) {}
+        try { if (window._axcb) window._axcb.push(function (axeptio) { axeptio.on('ready', function () { axeptio.userDeny && axeptio.userDeny(); }); }); } catch (e) {}
+      }
+
+      // Some CMPs (notably a few Google/IAB TCF integrations) render inside
+      // an open shadow root specifically to dodge plain querySelectorAll-
+      // based hiding. Walk into every open shadow root too, not just the
+      // light DOM.
+      function forEachRoot(root, fn) {
+        fn(root);
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) forEachRoot(all[i].shadowRoot, fn);
+        }
+      }
+
+      function hideKnown(root) {
+        var sel = selectors.join(',');
+        try {
+          var els = root.querySelectorAll(sel);
+          for (var j = 0; j < els.length; j++) els[j].style.setProperty('display', 'none', 'important');
+        } catch (e) {}
+      }
+
+      // Catch-all for banners not in the known list: a fixed/sticky,
+      // reasonably large, high-stacked element whose own text reads like a
+      // cookie/consent notice. Capped text length and z-index/position
+      // requirements keep this from matching ordinary page content.
+      function looksLikeConsentOverlay(el) {
+        if (!el || !el.getBoundingClientRect) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width < window.innerWidth * 0.4 || rect.height < 32 || rect.height > window.innerHeight * 0.9) return false;
+        var style = window.getComputedStyle(el);
+        if (style.position !== 'fixed' && style.position !== 'sticky') return false;
+        var z = parseInt(style.zIndex, 10);
+        if (isNaN(z) || z < 100) return false;
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        var text = (el.innerText || '').trim();
+        if (!text || text.length > 2500) return false;
+        return /cookie|consent|gdpr|ccpa|privacy preferences|we (use|value) your data|accept all|manage preferences|personali[sz]ed ads/i.test(text);
+      }
+
+      function hideHeuristic(root) {
+        var candidates = root.querySelectorAll ? root.querySelectorAll('body > div, body > section, body > aside, [role="dialog"], [role="alertdialog"]') : [];
+        for (var i = 0; i < candidates.length; i++) {
+          if (looksLikeConsentOverlay(candidates[i])) {
+            candidates[i].style.setProperty('display', 'none', 'important');
+          }
+        }
       }
 
       function hide() {
-        for (var i = 0; i < selectors.length; i++) {
-          try {
-            var els = document.querySelectorAll(selectors[i]);
-            for (var j = 0; j < els.length; j++) els[j].style.setProperty('display', 'none', 'important');
-          } catch (e) {}
-        }
+        forEachRoot(document, function (root) {
+          hideKnown(root);
+          hideHeuristic(root);
+        });
         // Many banners lock page scroll while shown; undo that once hidden.
         if (document.documentElement) document.documentElement.style.overflow = '';
         if (document.body) document.body.style.overflow = '';
@@ -106,14 +155,17 @@ enum WebEngine {
       function run() { hide(); rejectKnownCMPs(); }
       if (document.documentElement) run(); else document.addEventListener('DOMContentLoaded', run, { once: true });
 
-      var observer = new MutationObserver(hide);
+      var observer = new MutationObserver(function () {
+        clearTimeout(window.__undirectConsentDebounce);
+        window.__undirectConsentDebounce = setTimeout(hide, 250);
+      });
       function observe() {
         if (document.documentElement) observer.observe(document.documentElement, { childList: true, subtree: true });
       }
       if (document.documentElement) observe(); else document.addEventListener('DOMContentLoaded', observe, { once: true });
 
       // Banners frequently arrive late via their own async script; keep trying briefly.
-      [400, 1000, 2000, 4000].forEach(function (t) { setTimeout(run, t); });
+      [400, 1000, 2000, 4000, 7000].forEach(function (t) { setTimeout(run, t); });
     })();
     """
 

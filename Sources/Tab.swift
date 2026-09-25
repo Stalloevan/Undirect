@@ -463,12 +463,13 @@ extension Tab: WKUIDelegate {
             return delegate?.tab(self, createPopupWith: configuration, url: url)
         }
 
-        // A genuine tap on a target=_blank link to a non-ad site opens a normal new tab.
-        if action.navigationType == .linkActivated && !ContentBlocker.shared.isBlocked(host: destHost) {
-            delegate?.tab(self, openInNewTab: url)
-            return nil
-        }
-
+        // Every other new-window request is blocked outright — window.open(),
+        // target="_blank", a form submitting to a new window, all of it —
+        // with no exception for a click/tap trigger, since that's exactly
+        // the technique disguised ad popups use. A person who wants to
+        // deliberately open a link in a new tab has that as an explicit
+        // action in the link's own long-press menu, which never reaches
+        // this delegate method at all.
         block(.popups, host: destHost)
         return nil
     }
