@@ -304,7 +304,7 @@ final class LinkPreviewViewController: UIViewController {
                     }
                 } else {
                     self.pageSpinner.stopAnimating()
-                    let placeholder = UIImageView(image: UIImage(systemName: "photo"))
+                    let placeholder = UIImageView(image: Theme.icon("photo"))
                     placeholder.tintColor = Theme.secondaryText
                     placeholder.contentMode = .scaleAspectFit
                     placeholder.translatesAutoresizingMaskIntoConstraints = false

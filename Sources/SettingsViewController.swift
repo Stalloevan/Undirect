@@ -24,7 +24,7 @@ struct SettingsSection {
 class SettingsTableViewController: UITableViewController {
     var sections: [SettingsSection] = []
 
-    init() { super.init(style: .insetGrouped) }
+    init() { super.init(style: Theme.tableViewStyle) }
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {
@@ -185,7 +185,7 @@ final class NTPLayoutViewController: UITableViewController {
 
     private var order: [NTPSection] = Settings.shared.ntpOrder
 
-    init() { super.init(style: .insetGrouped) }
+    init() { super.init(style: Theme.tableViewStyle) }
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {
@@ -278,7 +278,7 @@ final class DomainListViewController: UITableViewController {
     init(title: String, store: DomainSetStore, footer: String) {
         self.store = store
         self.footer = footer
-        super.init(style: .insetGrouped)
+        super.init(style: Theme.tableViewStyle)
         self.title = title
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -344,7 +344,7 @@ final class DomainListViewController: UITableViewController {
 final class HiddenElementsViewController: UITableViewController {
     private var entries: [(String, [String])] = []
 
-    init() { super.init(style: .insetGrouped) }
+    init() { super.init(style: Theme.tableViewStyle) }
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {

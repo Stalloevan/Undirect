@@ -508,21 +508,21 @@ extension Tab: WKUIDelegate {
         }) { [weak self] _ in
             guard let self else { return nil }
             return UIMenu(children: [
-                UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in
+                UIAction(title: "Open", image: Theme.icon("arrow.up.right")) { [weak self] _ in
                     self?.load(url)
                 },
-                UIAction(title: "Open in New Tab", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in
+                UIAction(title: "Open in New Tab", image: Theme.icon("plus.square.on.square")) { [weak self] _ in
                     guard let self else { return }
                     self.delegate?.tab(self, openInNewTab: url)
                 },
-                UIAction(title: "Open in Background", image: UIImage(systemName: "square.stack")) { [weak self] _ in
+                UIAction(title: "Open in Background", image: Theme.icon("square.stack")) { [weak self] _ in
                     guard let self else { return }
                     self.delegate?.tab(self, openInBackgroundTab: url)
                 },
-                UIAction(title: "Copy Link", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIAction(title: "Copy Link", image: Theme.icon("doc.on.doc")) { _ in
                     UIPasteboard.general.url = url
                 },
-                UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+                UIAction(title: "Share", image: Theme.icon("square.and.arrow.up")) { [weak self] _ in
                     guard let self else { return }
                     self.delegate?.tab(self, share: url)
                 }

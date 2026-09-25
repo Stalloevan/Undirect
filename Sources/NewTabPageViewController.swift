@@ -163,13 +163,13 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
         let fav = favorites[indexPath.item]
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             UIMenu(children: [
-                UIAction(title: "Open in New Tab", image: UIImage(systemName: "plus.square.on.square")) { _ in
+                UIAction(title: "Open in New Tab", image: Theme.icon("plus.square.on.square")) { _ in
                     self?.onOpen?(url, true, false)
                 },
                 UIAction(title: "Open in Tor Tab", image: OnionIcon.image(pointSize: 18)) { _ in
                     self?.onOpen?(url, true, true)
                 },
-                UIAction(title: "Remove", image: UIImage(systemName: "star.slash"), attributes: .destructive) { _ in
+                UIAction(title: "Remove", image: Theme.icon("star.slash"), attributes: .destructive) { _ in
                     FavoritesStore.shared.remove(urlString: fav.urlString)
                 }
             ])
@@ -188,7 +188,7 @@ private final class HeaderView: UICollectionReusableView {
         super.init(frame: frame)
         label.font = .systemFont(ofSize: 12, weight: .semibold)
         label.textColor = Theme.secondaryText
-        button.setImage(UIImage(systemName: "slider.horizontal.3"), for: .normal)
+        button.setImage(Theme.icon("slider.horizontal.3"), for: .normal)
         button.tintColor = Theme.secondaryText
         button.accessibilityLabel = "Customize new tab page"
         button.addAction(UIAction { [weak self] _ in self?.onButton?() }, for: .touchUpInside)
@@ -255,6 +255,11 @@ private final class EmptyCell: UICollectionViewCell {
         contentView.addSubview(label)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        Theme.applyBlockShadow(to: contentView)
+    }
 }
 
 private final class StatsCell: UICollectionViewCell {
@@ -275,6 +280,11 @@ private final class StatsCell: UICollectionViewCell {
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        Theme.applyBlockShadow(to: contentView)
+    }
 
     func configure(detailed: Bool) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -313,7 +323,7 @@ private final class StatsCell: UICollectionViewCell {
     }
 
     private static func statView(_ kind: StatKind, value: String) -> UIView {
-        let icon = UIImageView(image: UIImage(systemName: kind.symbol))
+        let icon = UIImageView(image: Theme.icon(kind.symbol))
         icon.tintColor = Theme.secondaryText
         icon.contentMode = .scaleAspectFit
         icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
@@ -359,6 +369,11 @@ private final class TorCell: UICollectionViewCell {
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        Theme.applyBlockShadow(to: contentView)
+    }
 
     func configure(state: TorManager.State) {
         status.text = "Tor: " + state.description

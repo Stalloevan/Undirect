@@ -96,7 +96,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     private func updateToggleIcon() {
-        toggleButton.setImage(UIImage(systemName: mode == .full ? "sidebar.leading" : "sidebar.left"), for: .normal)
+        toggleButton.setImage(Theme.icon(mode == .full ? "sidebar.leading" : "sidebar.left"), for: .normal)
         toggleButton.accessibilityLabel = mode == .full ? "Show fewer tab details" : "Show tab names"
     }
 
@@ -188,7 +188,7 @@ private final class TabCell: UITableViewCell {
         ring.layer.borderColor = Theme.tor.cgColor
         titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
         titleLabel.textColor = Theme.text
-        closeButton.setImage(UIImage(systemName: "xmark"), for: .normal)
+        closeButton.setImage(Theme.icon("xmark"), for: .normal)
         closeButton.tintColor = Theme.secondaryText
         closeButton.addAction(UIAction { [weak self] _ in self?.onClose?() }, for: .touchUpInside)
         spinner.color = Theme.secondaryText
@@ -242,11 +242,19 @@ private final class TabCell: UITableViewCell {
         iconView.alpha = item.isLoading ? 0.35 : 1
         if item.isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
         ring.isHidden = !item.isTor
-        highlight.backgroundColor = item.isSelected ? Theme.field : .clear
         titleLabel.text = item.title
         titleLabel.isHidden = compact
         closeButton.isHidden = compact
         accessibilityLabel = (item.isTor ? "Tor tab: " : "Tab: ") + item.title
+
+        let edge = item.icon.edgeAverageColor()
+        highlight.backgroundColor = edge.withAlphaComponent(item.isSelected ? 0.45 : 0.16)
+        Theme.applyBlockShadow(to: highlight)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        Theme.applyBlockShadow(to: highlight)
     }
 }
 
@@ -275,7 +283,7 @@ private final class AddTabCell: UITableViewCell {
 
     func configure(compact: Bool) {
         var config = UIButton.Configuration.plain()
-        config.image = UIImage(systemName: "plus")
+        config.image = Theme.icon("plus")
         config.baseForegroundColor = Theme.accent
         if compact {
             config.contentInsets = .init(top: 0, leading: (TabSidebarView.minimalWidth - 22) / 2, bottom: 0, trailing: 0)

@@ -140,6 +140,52 @@ final class ElementHideStore {
 
 // MARK: - Favicons
 
+// MARK: - Edge color
+
+extension UIColor {
+    func blended(with other: UIColor, amount: CGFloat) -> UIColor {
+        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+        getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
+        other.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
+        let t = max(0, min(1, amount))
+        return UIColor(red: r1 + (r2 - r1) * t, green: g1 + (g2 - g1) * t, blue: b1 + (b2 - b1) * t, alpha: a1 + (a2 - a1) * t)
+    }
+}
+
+extension UIImage {
+    /// The average color of this image's outer border pixels — used to bleed
+    /// a favicon's own edge color out to fill its tab/row, rather than the
+    /// icon sitting on a flat, unrelated background.
+    func edgeAverageColor() -> UIColor {
+        let side = 10
+        guard let cgImage = cgImage else { return Theme.field }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        guard let ctx = CGContext(data: &pixels, width: side, height: side, bitsPerComponent: 8,
+                                  bytesPerRow: side * 4, space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return Theme.field }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
+
+        var rSum = 0.0, gSum = 0.0, bSum = 0.0, aSum = 0.0
+        for y in 0..<side {
+            for x in 0..<side {
+                guard x == 0 || y == 0 || x == side - 1 || y == side - 1 else { continue }
+                let o = (y * side + x) * 4
+                let a = Double(pixels[o + 3]) / 255.0
+                guard a > 0.05 else { continue }
+                rSum += Double(pixels[o]) / 255.0 * a
+                gSum += Double(pixels[o + 1]) / 255.0 * a
+                bSum += Double(pixels[o + 2]) / 255.0 * a
+                aSum += a
+            }
+        }
+        guard aSum > 0 else { return Theme.field }
+        return UIColor(red: rSum / aSum, green: gSum / aSum, blue: bSum / aSum, alpha: 1)
+    }
+}
+
 final class FaviconStore {
     static let shared = FaviconStore()
 

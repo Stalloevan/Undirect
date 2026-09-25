@@ -24,6 +24,7 @@ final class BrowserContainerViewController: UIViewController {
     private let addressBar = UIView()
     private let addressBarBackdrop = UIView()
     private let addressField = UITextField()
+    private let fieldBackground = UIView()
     private let addressIcon = UIImageView()
     private let reloadButton = UIButton(type: .system)
     private lazy var pageMenuButton = UIButton(type: .system)
@@ -92,6 +93,11 @@ final class BrowserContainerViewController: UIViewController {
         restoreSession()
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        Theme.applyBlockShadow(to: fieldBackground)
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         navigationController?.setNavigationBarHidden(true, animated: animated)
@@ -111,7 +117,6 @@ final class BrowserContainerViewController: UIViewController {
     private func buildChrome() {
         addressBar.backgroundColor = Theme.bar
         addressBarBackdrop.backgroundColor = Theme.bar
-        let fieldBackground = UIView()
         fieldBackground.backgroundColor = Theme.field
         fieldBackground.layer.cornerRadius = Theme.cornerRadius
 
@@ -134,7 +139,7 @@ final class BrowserContainerViewController: UIViewController {
         reloadButton.addAction(UIAction { [weak self] _ in self?.reloadOrStop() }, for: .touchUpInside)
 
         pageMenuButton.tintColor = Theme.text
-        pageMenuButton.setImage(UIImage(systemName: "ellipsis.circle"), for: .normal)
+        pageMenuButton.setImage(Theme.icon("ellipsis.circle"), for: .normal)
         pageMenuButton.showsMenuAsPrimaryAction = true
         pageMenuButton.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             done(self?.pageSettingsElements() ?? [])
@@ -533,16 +538,16 @@ final class BrowserContainerViewController: UIViewController {
             addressIcon.image = OnionIcon.image(pointSize: 16)
             addressIcon.tintColor = Theme.tor
         } else if tab.url?.scheme == "http" {
-            addressIcon.image = UIImage(systemName: "exclamationmark.triangle")
+            addressIcon.image = Theme.icon("exclamationmark.triangle")
             addressIcon.tintColor = .systemOrange
         } else if tab.url != nil {
-            addressIcon.image = UIImage(systemName: "lock.fill")
+            addressIcon.image = Theme.icon("lock.fill")
             addressIcon.tintColor = Theme.secondaryText
         } else {
-            addressIcon.image = UIImage(systemName: "magnifyingglass")
+            addressIcon.image = Theme.icon("magnifyingglass")
             addressIcon.tintColor = Theme.secondaryText
         }
-        reloadButton.setImage(UIImage(systemName: tab.webView.isLoading ? "xmark" : "arrow.clockwise"), for: .normal)
+        reloadButton.setImage(Theme.icon(tab.webView.isLoading ? "xmark" : "arrow.clockwise"), for: .normal)
         reloadButton.isHidden = tab.url == nil
 
         let progress = Float(tab.webView.estimatedProgress)
@@ -640,22 +645,22 @@ final class BrowserContainerViewController: UIViewController {
         pageActions.append(UIAction(title: tab.isTor ? "Turn Off Tor for This Tab" : "Use Tor for This Tab",
                                     image: OnionIcon.image(pointSize: 18)) { [weak self] _ in self?.toggleTor() })
         if tab.isTor && TorManager.shared.isReady {
-            pageActions.append(UIAction(title: "New Tor Identity", image: UIImage(systemName: "arrow.triangle.2.circlepath")) { _ in
+            pageActions.append(UIAction(title: "New Tor Identity", image: Theme.icon("arrow.triangle.2.circlepath")) { _ in
                 TorManager.shared.newIdentity { ok in
                     if ok { tab.webView.reload() }
                 }
             })
         }
         if let url = tab.webView.url {
-            pageActions.append(UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+            pageActions.append(UIAction(title: "Share", image: Theme.icon("square.and.arrow.up")) { [weak self] _ in
                 self?.present(UIActivityViewController(activityItems: [url], applicationActivities: nil), animated: true)
             })
         }
 
         let appActions: [UIMenuElement] = [
-            UIAction(title: "New Tab", image: UIImage(systemName: "plus.square")) { [weak self] _ in self?.openTab(url: nil, tor: false) },
+            UIAction(title: "New Tab", image: Theme.icon("plus.square")) { [weak self] _ in self?.openTab(url: nil, tor: false) },
             UIAction(title: "New Tor Tab", image: OnionIcon.image(pointSize: 18)) { [weak self] _ in self?.openTab(url: nil, tor: true) },
-            UIAction(title: "Settings", image: UIImage(systemName: "gearshape")) { [weak self] _ in
+            UIAction(title: "Settings", image: Theme.icon("gearshape")) { [weak self] _ in
                 let settings = SettingsViewController()
                 settings.onOpenFavorite = { url in self?.navigate(to: url) }
                 self?.navigationController?.pushViewController(settings, animated: true)
@@ -673,7 +678,7 @@ final class BrowserContainerViewController: UIViewController {
         if let url = tab.webView.url {
             let isFav = FavoritesStore.shared.isFavorite(url: url)
             actions.append(UIAction(title: isFav ? "Remove Favorite" : "Add Favorite",
-                                    image: UIImage(systemName: isFav ? "star.fill" : "star")) { [weak self] _ in
+                                    image: Theme.icon(isFav ? "star.fill" : "star")) { [weak self] _ in
                 FavoritesStore.shared.toggle(url: url, title: tab.webView.title ?? url.host ?? url.absoluteString)
                 self?.updateChrome()
             })
@@ -682,7 +687,7 @@ final class BrowserContainerViewController: UIViewController {
                 let normalized = WhitelistStore.normalize(host)
                 let trusted = WhitelistStore.shared.isWhitelisted(host: normalized)
                 actions.append(UIAction(title: trusted ? "Untrust Site" : "Trust Site",
-                                        image: UIImage(systemName: trusted ? "checkmark.shield.fill" : "checkmark.shield")) { [weak self] _ in
+                                        image: Theme.icon(trusted ? "checkmark.shield.fill" : "checkmark.shield")) { [weak self] _ in
                     if trusted { WhitelistStore.shared.remove(host: normalized) } else { WhitelistStore.shared.add(host: normalized) }
                     self?.showToast(trusted ? "\(normalized) can no longer redirect or open pop-ups" : "Trusted \(normalized) with redirects and pop-ups")
                     self?.updateChrome()
@@ -691,7 +696,7 @@ final class BrowserContainerViewController: UIViewController {
                 let base = DomainUtil.baseDomain(host)
                 let paused = ContentBlocker.shared.paused.contains(host: host)
                 actions.append(UIAction(title: paused ? "Resume Blocking on \(base)" : "Pause Blocking on \(base)",
-                                        image: UIImage(systemName: paused ? "play.circle" : "pause.circle")) { [weak self] _ in
+                                        image: Theme.icon(paused ? "play.circle" : "pause.circle")) { [weak self] _ in
                     ContentBlocker.shared.paused.toggle(host: host)
                     tab.applyContentRules(for: host, force: true)
                     tab.webView.reload()
@@ -699,17 +704,17 @@ final class BrowserContainerViewController: UIViewController {
                 })
             }
 
-            actions.append(UIAction(title: "Hide Element…", image: UIImage(systemName: "eye.slash")) { [weak self] _ in
+            actions.append(UIAction(title: "Hide Element…", image: Theme.icon("eye.slash")) { [weak self] _ in
                 self?.select(index: index)
                 self?.startPicking()
             })
         }
 
-        actions.append(UIAction(title: "Close Tab", image: UIImage(systemName: "xmark"), attributes: .destructive) { [weak self] _ in
+        actions.append(UIAction(title: "Close Tab", image: Theme.icon("xmark"), attributes: .destructive) { [weak self] _ in
             self?.close(tab: tab)
         })
         if tabs.count > 1 {
-            actions.append(UIAction(title: "Close Other Tabs", image: UIImage(systemName: "xmark.square")) { [weak self] _ in
+            actions.append(UIAction(title: "Close Other Tabs", image: Theme.icon("xmark.square")) { [weak self] _ in
                 for other in self?.tabs ?? [] where other !== tab { self?.close(tab: other) }
             })
         }
@@ -889,6 +894,10 @@ extension BrowserContainerViewController: TabDelegate {
 final class PaddedLabel: UILabel {
     var insets = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
     override func drawText(in rect: CGRect) { super.drawText(in: rect.inset(by: insets)) }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        Theme.applyBlockShadow(to: self)
+    }
     override var intrinsicContentSize: CGSize {
         let s = super.intrinsicContentSize
         return CGSize(width: s.width + insets.left + insets.right, height: s.height + insets.top + insets.bottom)
@@ -1006,6 +1015,13 @@ final class PulloutHandleView: UIView {
         ring.isHidden = !isTor
         iconView.alpha = isLoading ? 0.35 : 1
         if isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
+        let edge = icon.edgeAverageColor()
+        backgroundColor = Theme.bar.blended(with: edge, amount: 0.4)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        Theme.applyBlockShadow(to: self)
     }
 }
 

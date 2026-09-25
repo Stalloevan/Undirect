@@ -9,7 +9,7 @@ enum AppTheme: String, CaseIterable {
         switch self {
         case .catppuccin: return "Catppuccin"
         case .nord: return "Nord"
-        case .retro95: return "Retro 95"
+        case .retro95: return "Retro"
         }
     }
 }
@@ -103,6 +103,48 @@ enum Theme {
     static var isDark: Bool { palette().isDark }
     static var statusBarStyle: UIStatusBarStyle { isDark ? .lightContent : .darkContent }
     static var keyboardAppearance: UIKeyboardAppearance { isDark ? .dark : .light }
+    /// Rounded floating cards for Catppuccin's soft modern look; flush,
+    /// edge-to-edge sections for Nord's crisp edges and Retro's blocky panels.
+    static var tableViewStyle: UITableView.Style { Settings.shared.appTheme == .catppuccin ? .insetGrouped : .grouped }
+
+    /// SF Symbols render in visibly different letterform styles depending on
+    /// the font design behind them — this is what gives each theme its own
+    /// icon character without needing a per-symbol-name mapping.
+    private static var symbolDesign: UIFontDescriptor.SystemDesign {
+        switch Settings.shared.appTheme {
+        case .catppuccin: return .rounded
+        case .nord: return .monospaced
+        case .retro95: return .serif
+        }
+    }
+
+    static func icon(_ name: String, pointSize: CGFloat = 17, weight: UIImage.SymbolWeight = .regular) -> UIImage? {
+        let base = UIFont.systemFont(ofSize: pointSize, weight: .regular).fontDescriptor
+        let font: UIFont
+        if let designed = base.withDesign(symbolDesign) {
+            font = UIFont(descriptor: designed, size: pointSize)
+        } else {
+            font = UIFont.systemFont(ofSize: pointSize)
+        }
+        let config = UIImage.SymbolConfiguration(font: font).applying(UIImage.SymbolConfiguration(weight: weight))
+        return UIImage(systemName: name, withConfiguration: config)
+    }
+
+    /// Adds a solid, hard-edged, offset drop shadow — the classic "blocky"
+    /// retro look. A no-op (and clears any previously-applied shadow) on the
+    /// other themes. Call again whenever the view's bounds change (e.g. from
+    /// layoutSubviews), since the shadow path is a fixed snapshot of them.
+    static func applyBlockShadow(to view: UIView) {
+        guard Settings.shared.appTheme == .retro95, view.bounds.width > 0, view.bounds.height > 0 else {
+            view.layer.shadowOpacity = 0
+            return
+        }
+        view.layer.shadowColor = UIColor.black.cgColor
+        view.layer.shadowOffset = CGSize(width: 3, height: 3)
+        view.layer.shadowRadius = 0
+        view.layer.shadowOpacity = 1
+        view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
+    }
 }
 
 // MARK: - Settings
