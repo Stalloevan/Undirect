@@ -29,17 +29,6 @@ struct OpenImmersiveIntent: AppIntent {
     }
 }
 
-struct UndirectShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: OpenImmersiveIntent(),
-            phrases: ["Open immersive in \(.applicationName)", "Open \(.applicationName) immersive"],
-            shortTitle: "Open Immersive",
-            systemImageName: "rectangle.fill.on.rectangle.fill"
-        )
-    }
-}
-
 /// Hands a requested URL from the Shortcuts action (which runs before the
 /// app's UI necessarily exists yet) over to the browser once it's ready.
 enum ImmersiveRequest {

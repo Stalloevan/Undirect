@@ -101,9 +101,21 @@ final class BrowserContainerViewController: UIViewController {
         setupPageInteractionAutoHide()
         NotificationCenter.default.addObserver(self, selector: #selector(handleImmersiveRequest(_:)),
                                                name: ImmersiveRequest.notification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleOpenURLRequest),
+                                               name: OpenURLRequest.notification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNewTabRequest),
+                                               name: NewTabRequest.notification, object: nil)
         if let pending = ImmersiveRequest.pendingURL {
             ImmersiveRequest.pendingURL = nil
             DispatchQueue.main.async { [weak self] in self?.presentImmersive(url: pending) }
+        }
+        if let pending = OpenURLRequest.pending {
+            OpenURLRequest.pending = nil
+            DispatchQueue.main.async { [weak self] in self?.openTab(url: pending.url, tor: pending.tor) }
+        }
+        if let pendingTor = NewTabRequest.pendingTor {
+            NewTabRequest.pendingTor = nil
+            DispatchQueue.main.async { [weak self] in self?.openTab(url: nil, tor: pendingTor) }
         }
         restoreSession()
     }
@@ -362,6 +374,18 @@ final class BrowserContainerViewController: UIViewController {
     @objc private func handleImmersiveRequest(_ note: Notification) {
         guard let url = note.object as? URL else { return }
         presentImmersive(url: url)
+    }
+
+    @objc private func handleOpenURLRequest() {
+        guard let pending = OpenURLRequest.pending else { return }
+        OpenURLRequest.pending = nil
+        openTab(url: pending.url, tor: pending.tor)
+    }
+
+    @objc private func handleNewTabRequest() {
+        guard let tor = NewTabRequest.pendingTor else { return }
+        NewTabRequest.pendingTor = nil
+        openTab(url: nil, tor: tor)
     }
 
     /// Opens `url` as a normal tab (so it's right there with full chrome once
