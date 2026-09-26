@@ -238,6 +238,8 @@ private final class TabCell: UITableViewCell {
         if item.isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
         titleLabel.text = item.title
         titleLabel.isHidden = compact
+        // The onion indicator appears only in full (titled) mode; the minimal
+        // icon-only column stays clean.
         torBadge.isHidden = compact || !item.isTor
         closeButton.isHidden = compact
         accessibilityLabel = (item.isTor ? "Tor tab: " : "Tab: ") + item.title

@@ -4,6 +4,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     var window: UIWindow?
     private var browser: BrowserContainerViewController?
+
+    /// Lets a standalone PWA window hand a navigation back to the main browser.
+    func browserForExternalOpen() -> BrowserContainerViewController? { browser }
     private var lastAppliedTheme: AppTheme = Settings.shared.appTheme
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {

@@ -11,6 +11,8 @@ protocol TabDelegate: AnyObject {
     func tab(_ tab: Tab, openInTorTab url: URL)
     /// A pop-up was blocked; the container offers a one-tap override.
     func tab(_ tab: Tab, blockedPopupTo url: URL)
+    /// The current page declares an installable web-app manifest.
+    func tab(_ tab: Tab, foundInstallableManifest manifest: WebAppManifest)
     func tab(_ tab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView?
     func tabDidRequestClose(_ tab: Tab)
     func tab(_ tab: Tab, didPick selector: String, label: String)
@@ -24,6 +26,9 @@ final class Tab: NSObject {
     /// Hosts a window.open() web view created by WebKit. Such views share their
     /// opener's content controller, so we never add scripts/handlers/rules to them.
     let isPopup: Bool
+    /// When set (standalone PWA), a main-frame navigation for which this
+    /// returns true is handed off instead of loaded here.
+    var scopeEscapeHandler: ((URL) -> Bool)?
     let webView: WKWebView
     weak var delegate: TabDelegate?
 
@@ -331,6 +336,13 @@ extension Tab: WKNavigationDelegate {
         let isMainFrame = action.targetFrame?.isMainFrame ?? true
         guard isMainFrame else { decisionHandler(.allow); return }
 
+        // Standalone PWA: a main-frame navigation out of the app's scope is
+        // handed to the normal browser instead of loading in the app window.
+        if let escape = scopeEscapeHandler, action.navigationType != .other, escape(url) {
+            decisionHandler(.cancel)
+            return
+        }
+
         let destHost = url.host ?? ""
 
         if !isTor && destHost.lowercased().hasSuffix(".onion") {
@@ -459,7 +471,75 @@ extension Tab: WKNavigationDelegate {
         samplePageBackground()
         // Many pages set their final background after first paint.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.samplePageBackground() }
+        detectManifest()
         delegate?.tabDidChange(self)
+    }
+
+    /// Reads a page's web-app manifest (and Apple/theme meta fallbacks) so the
+    /// container can offer to install it. Runs in the page world since it must
+    /// fetch the manifest with the page's own credentials/scope.
+    private func detectManifest() {
+        guard !isPopup, let pageURL = webView.url, pageURL.scheme == "https" else { return }
+        let js = """
+        (async function () {
+          function meta(sel) { var m = document.querySelector(sel); return m ? (m.content || m.getAttribute('content')) : null; }
+          var result = { name: document.title || location.hostname, icons: [], display: null, theme: null, background: null, start: location.href, scope: null, manifest: false };
+          try {
+            var link = document.querySelector('link[rel~="manifest"]');
+            if (link && link.href) {
+              var res = await fetch(link.href, { credentials: 'include' });
+              if (res.ok) {
+                var m = await res.json();
+                result.manifest = true;
+                if (m.name || m.short_name) result.name = m.name || m.short_name;
+                if (m.display) result.display = m.display;
+                if (m.theme_color) result.theme = m.theme_color;
+                if (m.background_color) result.background = m.background_color;
+                if (m.start_url) result.start = new URL(m.start_url, link.href).href;
+                if (m.scope) result.scope = new URL(m.scope, link.href).href;
+                if (Array.isArray(m.icons)) {
+                  result.icons = m.icons.map(function (ic) {
+                    try { return { src: new URL(ic.src, link.href).href, size: parseInt((ic.sizes || '0x0').split('x')[0], 10) || 0 }; } catch (e) { return null; }
+                  }).filter(Boolean);
+                }
+              }
+            }
+          } catch (e) {}
+          if (!result.theme) result.theme = meta('meta[name="theme-color"]');
+          var apple = meta('meta[name="apple-mobile-web-app-capable"]');
+          if (apple === 'yes' && !result.display) result.display = 'standalone';
+          var appleTitle = meta('meta[name="apple-mobile-web-app-title"]');
+          if (appleTitle) result.name = appleTitle;
+          var touch = document.querySelector('link[rel~="apple-touch-icon"]');
+          if (touch && touch.href) result.icons.push({ src: touch.href, size: 180 });
+          return result;
+        })();
+        """
+        webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] result in
+            guard let self, case .success(let value) = result, let dict = value as? [String: Any] else { return }
+            let display = (dict["display"] as? String) ?? "browser"
+            guard ["standalone", "fullscreen", "minimal-ui"].contains(display) else { return }
+            guard let startString = dict["start"] as? String, let startURL = URL(string: startString) else { return }
+            let scopeString = (dict["scope"] as? String) ?? (startURL.scheme.map { "\($0)://\(startURL.host ?? "")/" } ?? startString)
+            let icons = (dict["icons"] as? [[String: Any]]) ?? []
+            let iconURLs = icons.sorted { ($0["size"] as? Int ?? 0) > ($1["size"] as? Int ?? 0) }
+                .compactMap { ($0["src"] as? String).flatMap(URL.init(string:)) }
+            let manifest = WebAppManifest(
+                name: (dict["name"] as? String) ?? (startURL.host ?? "Web App"),
+                startURL: startURL,
+                scope: URL(string: scopeString) ?? startURL,
+                display: display,
+                themeColorHex: (dict["theme"] as? String).flatMap(Self.normalizeHex),
+                backgroundColorHex: (dict["background"] as? String).flatMap(Self.normalizeHex),
+                iconURLs: iconURLs
+            )
+            self.delegate?.tab(self, foundInstallableManifest: manifest)
+        }
+    }
+
+    private static func normalizeHex(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        return s.hasPrefix("#") ? s : (UIColor(hex: s) != nil ? s : nil)
     }
 
     private func samplePageBackground() {

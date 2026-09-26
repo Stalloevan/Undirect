@@ -241,11 +241,12 @@ enum SidebarPosition: String, CaseIterable {
 }
 
 enum NTPSection: String, CaseIterable, Codable {
-    case favorites, stats, tor
+    case favorites, apps, stats, tor
 
     var title: String {
         switch self {
         case .favorites: return "Favorites"
+        case .apps: return "Apps"
         case .stats: return "Blocking statistics"
         case .tor: return "Tor"
         }

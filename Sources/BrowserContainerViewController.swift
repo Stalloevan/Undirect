@@ -59,6 +59,8 @@ final class BrowserContainerViewController: UIViewController {
     private var pickingTab: Tab?
     private var lastAppliedSidebarPosition: SidebarPosition?
     private var swipeNav: SwipeNavState?
+    private var detectedManifest: WebAppManifest?
+    private var shownInstallPromptFor: Set<String> = []
 
     // MARK: Lifecycle
 
@@ -77,6 +79,7 @@ final class BrowserContainerViewController: UIViewController {
             if newTab { self.openTab(url: url, tor: tor) } else { self.navigate(to: url) }
         }
         ntp.onNewTorTab = { [weak self] in self?.openTab(url: nil, tor: true) }
+        ntp.onLaunchPWA = { [weak self] pwa in self?.launchPWA(pwa) }
         ntp.onCustomize = { [weak self] in
             self?.navigationController?.pushViewController(NTPLayoutViewController(), animated: true)
         }
@@ -604,6 +607,7 @@ final class BrowserContainerViewController: UIViewController {
 
     private func showCurrentTab() {
         for sub in contentView.subviews where sub is WKWebView { sub.removeFromSuperview() }
+        detectedManifest = nil
         guard let tab = currentTab else { return }
         tab.webView.frame = contentView.bounds
         tab.webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -798,6 +802,16 @@ final class BrowserContainerViewController: UIViewController {
                 self?.present(UIActivityViewController(activityItems: [url], applicationActivities: nil), animated: true)
             })
         }
+        if let manifest = detectedManifest, tab.webView.url != nil, !tab.isTor,
+           manifest.startURL.host == tab.webView.url?.host {
+            if PWAStore.shared.isInstalled(startURL: manifest.startURL) {
+                pageActions.append(UIAction(title: "App Installed", image: Theme.icon("checkmark.circle"), attributes: .disabled) { _ in })
+            } else {
+                pageActions.append(UIAction(title: "Install as App", image: Theme.icon("square.and.arrow.down.on.square")) { [weak self] _ in
+                    self?.installPWA(manifest)
+                })
+            }
+        }
 
         let appActions: [UIMenuElement] = [
             UIAction(title: "Settings", image: Theme.icon("gearshape")) { [weak self] _ in
@@ -900,6 +914,62 @@ final class BrowserContainerViewController: UIViewController {
     }
 
     // MARK: Toast
+
+    // MARK: PWA
+
+    func installPWA(_ manifest: WebAppManifest) {
+        let seed = abs(PWAStore.identifier(for: manifest.startURL).hashValue)
+        fetchBestIcon(from: manifest.iconURLs) { [weak self] pngData in
+            let pwa = InstalledPWA(
+                id: PWAStore.identifier(for: manifest.startURL),
+                name: manifest.name,
+                startURL: manifest.startURL.absoluteString,
+                scope: manifest.scope.absoluteString,
+                themeColorHex: manifest.themeColorHex,
+                backgroundColorHex: manifest.backgroundColorHex,
+                iconPNGBase64: pngData?.base64EncodedString(),
+                iconSeed: seed
+            )
+            PWAStore.shared.install(pwa)
+            self?.showToast("\(manifest.name) installed")
+        }
+    }
+
+    /// Fetches the largest usable manifest icon over a plain ephemeral session
+    /// (never for Tor — but PWAs are non-Tor by construction here). Falls back
+    /// to a generated icon if none load.
+    private func fetchBestIcon(from urls: [URL], completion: @escaping (Data?) -> Void) {
+        var remaining = urls
+        func tryNext() {
+            guard !remaining.isEmpty else { completion(nil); return }
+            let url = remaining.removeFirst()
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 8
+            URLSession(configuration: config).dataTask(with: url) { data, response, _ in
+                if let data, (response as? HTTPURLResponse)?.statusCode ?? 0 < 400, UIImage(data: data) != nil {
+                    // Re-encode to PNG at a reasonable size to bound storage.
+                    if let image = UIImage(data: data) {
+                        let target = CGSize(width: 180, height: 180)
+                        let resized = UIGraphicsImageRenderer(size: target).image { _ in
+                            image.draw(in: CGRect(origin: .zero, size: target))
+                        }
+                        DispatchQueue.main.async { completion(resized.pngData()) }
+                        return
+                    }
+                }
+                DispatchQueue.main.async { tryNext() }
+            }.resume()
+        }
+        tryNext()
+    }
+
+    func launchPWA(_ pwa: InstalledPWA) {
+        guard let url = pwa.startURLValue else { return }
+        let vc = StandalonePWAViewController(pwa: pwa)
+        vc.modalPresentationStyle = .fullScreen
+        present(vc, animated: true)
+        _ = url
+    }
 
     private func showToast(_ message: String, action: (() -> Void)? = nil) {
         let label = PaddedLabel()
@@ -1026,6 +1096,18 @@ extension BrowserContainerViewController: TabDelegate {
         let host = DomainUtil.baseDomain(url.host ?? "")
         showToast("Blocked pop-up to \(host) · Tap to open") { [weak self] in
             self?.openTab(url: url, tor: tab.isTor)
+        }
+    }
+
+    func tab(_ tab: Tab, foundInstallableManifest manifest: WebAppManifest) {
+        guard tab === currentTab, !tab.isTor else { return }
+        detectedManifest = manifest
+        // Only nudge once per app, and never if already installed.
+        guard !PWAStore.shared.isInstalled(startURL: manifest.startURL),
+              !shownInstallPromptFor.contains(PWAStore.identifier(for: manifest.startURL)) else { return }
+        shownInstallPromptFor.insert(PWAStore.identifier(for: manifest.startURL))
+        showToast("Install \(manifest.name) as an app? · Tap to add") { [weak self] in
+            self?.installPWA(manifest)
         }
     }
 

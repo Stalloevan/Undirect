@@ -4,11 +4,13 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
 
     var onOpen: ((URL, _ newTab: Bool, _ tor: Bool) -> Void)?
     var onNewTorTab: (() -> Void)?
+    var onLaunchPWA: ((InstalledPWA) -> Void)?
     var onCustomize: (() -> Void)?
 
     private var collectionView: UICollectionView!
     private var sections: [NTPSection] = []
     private var favorites: [FavoriteSite] = []
+    private var apps: [InstalledPWA] = []
     private var reloadScheduled = false
 
     override func viewDidLoad() {
@@ -30,7 +32,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
         view.addSubview(collectionView)
 
         let nc = NotificationCenter.default
-        for name in [Settings.didChange, FavoritesStore.didChange, BlockStats.didChange, TorManager.stateDidChange] {
+        for name in [Settings.didChange, FavoritesStore.didChange, BlockStats.didChange, TorManager.stateDidChange, PWAStore.didChange] {
             nc.addObserver(self, selector: #selector(scheduleReload), name: name, object: nil)
         }
         reload()
@@ -54,6 +56,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
         guard isViewLoaded else { return }
         sections = Settings.shared.ntpVisibleSections
         favorites = FavoritesStore.shared.all()
+        apps = PWAStore.shared.all()
         collectionView.setCollectionViewLayout(makeLayout(), animated: false)
         collectionView.reloadData()
     }
@@ -65,6 +68,8 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
             guard let self, self.sections.indices.contains(index) else { return nil }
             let section: NSCollectionLayoutSection
             switch self.sections[index] {
+            case .apps where !self.apps.isEmpty:
+                fallthrough
             case .favorites where !self.favorites.isEmpty:
                 let columns = Settings.shared.ntpColumns
                 let itemHeight: CGFloat = Settings.shared.ntpShowTitles ? 86 : 64
@@ -81,6 +86,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
                 case .stats: height = Settings.shared.ntpDetailedStats ? 176 : 72
                 case .tor: height = 72
                 case .favorites: height = 72
+                case .apps: height = 72
                 }
                 let size = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(height))
                 let group = NSCollectionLayoutGroup.horizontal(layoutSize: size, subitems: [NSCollectionLayoutItem(layoutSize: size)])
@@ -103,6 +109,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
         switch sections[section] {
         case .favorites: return max(favorites.count, 1)
+        case .apps: return max(apps.count, 1)
         case .stats, .tor: return 1
         }
     }
@@ -129,6 +136,16 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
                 }
             }
             return cell
+        case .apps:
+            guard !apps.isEmpty else {
+                let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "empty", for: indexPath) as! EmptyCell
+                cell.label.text = "Installable web apps appear here."
+                return cell
+            }
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "fav", for: indexPath) as! FavoriteCell
+            let app = apps[indexPath.item]
+            cell.configure(title: app.name, icon: PWAIconFactory.icon(for: app), showTitle: Settings.shared.ntpShowTitles)
+            return cell
         case .stats:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "stats", for: indexPath) as! StatsCell
             cell.configure(detailed: Settings.shared.ntpDetailedStats)
@@ -151,13 +168,27 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard sections[indexPath.section] == .favorites, favorites.indices.contains(indexPath.item),
+        let sec = sections[indexPath.section]
+        if sec == .apps, apps.indices.contains(indexPath.item) {
+            onLaunchPWA?(apps[indexPath.item]); return
+        }
+        guard sec == .favorites, favorites.indices.contains(indexPath.item),
               let url = URL(string: favorites[indexPath.item].urlString) else { return }
         onOpen?(url, false, false)
     }
 
     func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath,
                         point: CGPoint) -> UIContextMenuConfiguration? {
+        if sections[indexPath.section] == .apps, apps.indices.contains(indexPath.item) {
+            let app = apps[indexPath.item]
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+                UIMenu(children: [
+                    UIAction(title: "Uninstall App", image: Theme.icon("trash"), attributes: .destructive) { _ in
+                        PWAStore.shared.remove(id: app.id)
+                    }
+                ])
+            }
+        }
         guard sections[indexPath.section] == .favorites, favorites.indices.contains(indexPath.item),
               let url = URL(string: favorites[indexPath.item].urlString) else { return nil }
         let fav = favorites[indexPath.item]
