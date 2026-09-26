@@ -32,10 +32,40 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
         view.addSubview(collectionView)
 
         let nc = NotificationCenter.default
-        for name in [Settings.didChange, FavoritesStore.didChange, BlockStats.didChange, TorManager.stateDidChange, PWAStore.didChange] {
+        for name in [Settings.didChange, FavoritesStore.didChange, PWAStore.didChange] {
             nc.addObserver(self, selector: #selector(scheduleReload), name: name, object: nil)
         }
+        // Stats tick on every blocked request and Tor state changes often;
+        // both only need their own cell refreshed, not the whole page.
+        nc.addObserver(self, selector: #selector(scheduleLiveRefresh), name: BlockStats.didChange, object: nil)
+        nc.addObserver(self, selector: #selector(scheduleLiveRefresh), name: TorManager.stateDidChange, object: nil)
         reload()
+    }
+
+    /// True while a page is covering the NTP — work is deferred until it's shown.
+    private var isOffscreen: Bool { view.isHidden || view.window == nil }
+    private var needsReload = false
+    private var liveRefreshScheduled = false
+
+    @objc private func scheduleLiveRefresh() {
+        guard !isOffscreen, !liveRefreshScheduled else { return }
+        liveRefreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.liveRefreshScheduled = false
+            guard !self.isOffscreen else { return }
+            for indexPath in self.collectionView.indexPathsForVisibleItems {
+                guard self.sections.indices.contains(indexPath.section) else { continue }
+                switch self.sections[indexPath.section] {
+                case .stats:
+                    (self.collectionView.cellForItem(at: indexPath) as? StatsCell)?.configure(detailed: Settings.shared.ntpDetailedStats)
+                case .tor:
+                    (self.collectionView.cellForItem(at: indexPath) as? TorCell)?.configure(state: TorManager.shared.state)
+                default:
+                    break
+                }
+            }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -44,6 +74,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
     }
 
     @objc private func scheduleReload() {
+        guard !isOffscreen else { needsReload = true; return }
         guard !reloadScheduled else { return }
         reloadScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -54,6 +85,7 @@ final class NewTabPageViewController: UIViewController, UICollectionViewDataSour
 
     func reload() {
         guard isViewLoaded else { return }
+        needsReload = false
         sections = Settings.shared.ntpVisibleSections
         favorites = FavoritesStore.shared.all()
         apps = PWAStore.shared.all()
@@ -317,11 +349,16 @@ private final class StatsCell: UICollectionViewCell {
         Theme.applyBlockShadow(to: contentView)
     }
 
+    private static let formatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f
+    }()
+
     func configure(detailed: Bool) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let stats = BlockStats.shared
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
+        let formatter = Self.formatter
 
         let total = UILabel()
         total.attributedText = {

@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 /// Persists open tabs so they survive the app being closed or killed in the
 /// background. Tor tabs keep only their current address — never their
@@ -26,8 +27,23 @@ final class SessionStore {
 
     private init() {}
 
-    func save(tabs: [Tab], selected: Tab?) {
+    /// What the last save looked like (tab ids, addresses, selection), so the
+    /// frequent debounced saves during page loads can skip re-archiving every
+    /// tab's history when nothing that matters has changed.
+    private var lastSignature: String?
+
+    func save(tabs: [Tab], selected: Tab?, onlyIfChanged: Bool = false) {
         let persistable = tabs
+        var parts: [String] = []
+        for tab in persistable {
+            let url = tab.url?.absoluteString ?? ""
+            let historyCount = tab.webView.backForwardList.backList.count
+            parts.append(tab.id.uuidString + "|" + url + "|" + String(historyCount))
+        }
+        let selectedID = selected?.id.uuidString ?? "-"
+        let signature = parts.joined(separator: "\n") + "#" + selectedID
+        if onlyIfChanged, signature == lastSignature { return }
+        lastSignature = signature
         let saved = persistable.map { tab -> SavedTab in
             SavedTab(id: tab.id, url: tab.url?.absoluteString,
                      state: tab.isTor ? nil : Self.archive(tab.webView.interactionState),
@@ -56,6 +72,7 @@ final class SessionStore {
     }
 
     func clear() {
+        lastSignature = nil
         UserDefaults.standard.removeObject(forKey: key)
     }
 

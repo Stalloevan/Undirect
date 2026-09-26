@@ -210,26 +210,53 @@ final class FaviconStore {
 
     private func key(_ host: String) -> String { DomainUtil.normalize(host) }
 
+    /// Hosts with no usable icon (or not on disk), remembered for the session
+    /// so the NTP and sidebar don't re-hit the disk and network for them on
+    /// every refresh.
+    private var knownMissingOnDisk: Set<String> = []
+    private var failedAt: [String: Date] = [:]
+    /// Concurrent requests for the same host share one fetch.
+    private var inFlight: [String: [(UIImage?) -> Void]] = [:]
+    private let diskQueue = DispatchQueue(label: "undirect.favicons.disk", qos: .utility)
+
     func cached(host: String?) -> UIImage? {
         guard let host else { return nil }
         let k = key(host)
         if let image = memory[k] { return image }
+        if knownMissingOnDisk.contains(k) { return nil }
         let file = directory.appendingPathComponent(k + ".png")
         if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
             memory[k] = image
             return image
         }
+        knownMissingOnDisk.insert(k)
         return nil
     }
 
     /// Fetches over a plain ephemeral session. Never call this for Tor tabs.
     func fetch(host: String, hint: URL?, completion: @escaping (UIImage?) -> Void) {
         if let image = cached(host: host) { completion(image); return }
+        let k = key(host)
+        // Don't retry a host that just failed (retry after 10 minutes).
+        if let failed = failedAt[k], Date().timeIntervalSince(failed) < 600 {
+            completion(nil)
+            return
+        }
+        if inFlight[k] != nil {
+            inFlight[k]?.append(completion)
+            return
+        }
+        inFlight[k] = [completion]
         var candidates: [URL] = []
         if let hint { candidates.append(hint) }
         if let u = URL(string: "https://\(host)/apple-touch-icon.png") { candidates.append(u) }
         if let u = URL(string: "https://\(host)/favicon.ico") { candidates.append(u) }
-        tryNext(candidates, host: host, completion: completion)
+        tryNext(candidates, host: host) { [weak self] image in
+            guard let self else { return }
+            if image == nil { self.failedAt[k] = Date() }
+            let waiting = self.inFlight.removeValue(forKey: k) ?? []
+            waiting.forEach { $0(image) }
+        }
     }
 
     private func tryNext(_ urls: [URL], host: String, completion: @escaping (UIImage?) -> Void) {
@@ -242,12 +269,17 @@ final class FaviconStore {
             if let data, (response as? HTTPURLResponse)?.statusCode ?? 0 < 400,
                let image = UIImage(data: data), image.size.width >= 16 {
                 let resized = Self.normalize(image)
+                let png = resized.pngData()
                 DispatchQueue.main.async {
-                    self.memory[self.key(host)] = resized
-                    if let png = resized.pngData() {
-                        try? png.write(to: self.directory.appendingPathComponent(self.key(host) + ".png"))
-                    }
+                    let k = self.key(host)
+                    self.memory[k] = resized
+                    self.knownMissingOnDisk.remove(k)
                     completion(resized)
+                }
+                // Disk write off the main thread.
+                if let png {
+                    let file = self.directory.appendingPathComponent(self.key(host) + ".png")
+                    self.diskQueue.async { try? png.write(to: file, options: .atomic) }
                 }
             } else {
                 self.tryNext(Array(urls.dropFirst()), host: host, completion: completion)

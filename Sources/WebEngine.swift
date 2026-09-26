@@ -112,7 +112,10 @@ enum WebEngine {
             // Canvas: tiny deterministic per-site noise on read-back.
             function noisify(img) {
               var d = img.data;
-              if (d.length > 16000000) return img;
+              // Fingerprinting uses small canvases. Leaving large read-backs
+              // untouched keeps canvas-heavy pages (editors, games calling this
+              // every frame) fast.
+              if (d.length > 1000000) return img;
               for (var i = 0; i < d.length; i += 4) {
                 var v = mix(i);
                 if ((v & 15) === 0) { var c = i + ((v >>> 4) % 3); d[c] = d[c] ^ 1; }
@@ -126,7 +129,7 @@ enum WebEngine {
               var copy = function (canvas) {
                 try {
                   var cw = canvas.width, ch = canvas.height;
-                  if (!cw || !ch || cw * ch > 4000000) return null;
+                  if (!cw || !ch || cw * ch > 250000) return null;
                   var c = w.document.createElement('canvas'); c.width = cw; c.height = ch;
                   var ctx = c.getContext('2d');
                   ctx.drawImage(canvas, 0, 0);
@@ -342,11 +345,17 @@ enum WebEngine {
         }
       }
 
+      var SEL = selectors.join(',');
+      var hidAny = false;
+
       function hideKnown(root) {
-        var sel = selectors.join(',');
         try {
-          var els = root.querySelectorAll(sel);
-          for (var j = 0; j < els.length; j++) els[j].style.setProperty('display', 'none', 'important');
+          var els = root.querySelectorAll(SEL);
+          for (var j = 0; j < els.length; j++) {
+            if (els[j].style.getPropertyValue('display') === 'none') continue;
+            els[j].style.setProperty('display', 'none', 'important');
+            hidAny = true;
+          }
         } catch (e) {}
       }
 
@@ -373,29 +382,47 @@ enum WebEngine {
         for (var i = 0; i < candidates.length; i++) {
           if (looksLikeConsentOverlay(candidates[i])) {
             candidates[i].style.setProperty('display', 'none', 'important');
+            hidAny = true;
           }
         }
       }
 
-      function hide() {
-        forEachRoot(document, function (root) {
-          hideKnown(root);
-          hideHeuristic(root);
-        });
-        // Many banners lock page scroll while shown; undo that once hidden.
-        if (document.documentElement) document.documentElement.style.overflow = '';
-        if (document.body) document.body.style.overflow = '';
+      // Walking every element for shadow roots is the expensive part, so
+      // it's done only on the timed passes, not on every DOM mutation.
+      function hide(deep) {
+        hidAny = false;
+        if (deep) {
+          forEachRoot(document, function (root) { hideKnown(root); hideHeuristic(root); });
+        } else {
+          hideKnown(document);
+          hideHeuristic(document);
+        }
+        // Many banners lock page scroll while shown; undo that only when we
+        // actually hid one — otherwise this fought the site's own menus and
+        // viewers that lock scrolling on purpose.
+        if (hidAny) {
+          if (document.documentElement) document.documentElement.style.overflow = '';
+          if (document.body) document.body.style.overflow = '';
+        }
       }
 
-      function run() { hide(); rejectKnownCMPs(); }
+      function run() { hide(true); rejectKnownCMPs(); }
       if (document.documentElement) run(); else document.addEventListener('DOMContentLoaded', run, { once: true });
 
-      var observer = new MutationObserver(function () {
-        clearTimeout(window.__undirectConsentDebounce);
-        window.__undirectConsentDebounce = setTimeout(hide, 250);
+      // Watch for late banners, but only react to added elements, and stop
+      // watching after 20s — banners appear early, and a forever-running
+      // subtree observer taxed infinite-scroll pages on every update.
+      var pending = null;
+      var observer = new MutationObserver(function (records) {
+        var added = false;
+        for (var i = 0; i < records.length; i++) { if (records[i].addedNodes.length) { added = true; break; } }
+        if (!added || pending) return;
+        pending = setTimeout(function () { pending = null; hide(false); }, 300);
       });
       function observe() {
-        if (document.documentElement) observer.observe(document.documentElement, { childList: true, subtree: true });
+        if (!document.documentElement) return;
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        setTimeout(function () { observer.disconnect(); }, 20000);
       }
       if (document.documentElement) observe(); else document.addEventListener('DOMContentLoaded', observe, { once: true });
 

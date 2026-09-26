@@ -419,6 +419,9 @@ final class BrowserContainerViewController: UIViewController {
     /// back to hidden, whichever of the two visible states it was in.
     @objc private func handleImmersiveRequest(_ note: Notification) {
         guard let url = note.object as? URL else { return }
+        // Handled live — clear the cold-launch hand-off too, or the next
+        // rebuild of this screen (e.g. a theme change) would reopen it.
+        ImmersiveRequest.pendingURL = nil
         presentImmersive(url: url)
     }
 
@@ -641,7 +644,7 @@ final class BrowserContainerViewController: UIViewController {
         persistScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.persistScheduled = false
-            self?.persist()
+            self?.persist(onlyIfChanged: true)
         }
     }
 
@@ -702,6 +705,9 @@ final class BrowserContainerViewController: UIViewController {
         for sub in contentView.subviews where sub is WKWebView { sub.removeFromSuperview() }
         detectedManifest = nil
         guard let tab = currentTab else { return }
+        // Immersive mode lays the web view out with constraints; switch back
+        // to autoresizing or it stops following rotation/size changes.
+        tab.webView.translatesAutoresizingMaskIntoConstraints = true
         tab.webView.frame = contentView.bounds
         tab.webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         contentView.insertSubview(tab.webView, at: 0)
@@ -724,8 +730,9 @@ final class BrowserContainerViewController: UIViewController {
         return Settings.shared.searchURL(for: text)
     }
 
-    func persist() {
-        SessionStore.shared.save(tabs: tabs.filter { !$0.isPopup || $0.url != nil }, selected: currentTab)
+    func persist(onlyIfChanged: Bool = false) {
+        SessionStore.shared.save(tabs: tabs.filter { !$0.isPopup || $0.url != nil }, selected: currentTab,
+                                 onlyIfChanged: onlyIfChanged)
         BlockStats.shared.flush()
     }
 
@@ -1038,7 +1045,10 @@ final class BrowserContainerViewController: UIViewController {
     // MARK: PWA
 
     func installPWA(_ manifest: WebAppManifest) {
-        let seed = abs(PWAStore.identifier(for: manifest.startURL).hashValue)
+        // Stable across launches (String.hashValue is randomized per run, and
+        // abs(Int.min) would trap).
+        let seed = PWAStore.identifier(for: manifest.startURL).unicodeScalars
+            .reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0x7fff_ffff }
         fetchBestIcon(from: manifest.iconURLs) { [weak self] pngData in
             let pwa = InstalledPWA(
                 id: PWAStore.identifier(for: manifest.startURL),

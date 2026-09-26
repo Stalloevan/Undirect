@@ -110,20 +110,23 @@ enum URLCleaner {
     }
 
     private static func stripParams(_ url: URL) -> URL? {
+        // Works on the *percent-encoded* items so everything that's kept goes
+        // back byte-for-byte: decoding and re-encoding turned "%2B" into "+",
+        // which servers read as a space (a search for "c++" became "c  ").
         guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let items = comps.queryItems, !items.isEmpty else { return nil }
+              let items = comps.percentEncodedQueryItems, !items.isEmpty else { return nil }
         let base = DomainUtil.baseDomain(url.host ?? "")
         let extra = siteParams[base] ?? []
 
         let kept = items.filter { item in
-            let name = item.name.lowercased()
+            let name = (item.name.removingPercentEncoding ?? item.name).lowercased()
             if name.hasPrefix("utm_") { return false }
             if trackingParams.contains(name) { return false }
             if extra.contains(name) { return false }
             return true
         }
         guard kept.count != items.count else { return nil }
-        comps.queryItems = kept.isEmpty ? nil : kept
+        comps.percentEncodedQueryItems = kept.isEmpty ? nil : kept
         return comps.url
     }
 }

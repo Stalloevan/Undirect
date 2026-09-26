@@ -120,11 +120,17 @@ final class StandalonePWAViewController: UIViewController {
     override var preferredStatusBarStyle: UIStatusBarStyle { themeColor.isLight ? .darkContent : .lightContent }
 
     private func openInBrowser() {
-        let url = pwaTab.webView.url ?? pwa.startURLValue
-        dismiss(animated: true) { [weak self] in
-            guard let url, let scene = self?.view.window?.windowScene,
-                  let browser = (scene.delegate as? SceneDelegate)?.browserForExternalOpen() else { return }
-            browser.openTab(url: url)
+        guard let url = pwaTab.webView.url ?? pwa.startURLValue else { dismiss(animated: true); return }
+        handOffToBrowser(url)
+    }
+
+    /// Looks the browser up *before* dismissing: once this window is gone its
+    /// view has no window (and self may be deallocated), which is why these
+    /// links used to vanish instead of opening in the browser.
+    fileprivate func handOffToBrowser(_ url: URL) {
+        let browser = (view.window?.windowScene?.delegate as? SceneDelegate)?.browserForExternalOpen()
+        dismiss(animated: true) {
+            browser?.openTab(url: url)
         }
     }
 }
@@ -152,11 +158,7 @@ extension StandalonePWAViewController: TabDelegate {
     /// A navigation outside the installed app's scope opens in the normal
     /// browser, so the standalone window only ever shows the app itself.
     func escapeScope(_ url: URL) {
-        dismiss(animated: true) { [weak self] in
-            guard let scene = self?.view.window?.windowScene,
-                  let browser = (scene.delegate as? SceneDelegate)?.browserForExternalOpen() else { return }
-            browser.openTab(url: url)
-        }
+        handOffToBrowser(url)
     }
 }
 

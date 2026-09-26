@@ -21,8 +21,12 @@ struct InstalledPWA: Codable, Equatable {
 
     func inScope(_ url: URL) -> Bool {
         guard let scopeURL = URL(string: scope), let host = url.host, let scopeHost = scopeURL.host,
-              host == scopeHost else { return false }
-        return url.path.hasPrefix(scopeURL.path) || scopeURL.path == "/" || scopeURL.path.isEmpty
+              host.lowercased() == scopeHost.lowercased() else { return false }
+        let scopePath = scopeURL.path
+        if scopePath.isEmpty || scopePath == "/" { return true }
+        // "/app" must not match "/application": compare on a path boundary.
+        let base = scopePath.hasSuffix("/") ? String(scopePath.dropLast()) : scopePath
+        return url.path == base || url.path.hasPrefix(base + "/")
     }
 }
 
@@ -49,9 +53,13 @@ final class PWAStore {
 
     private init() {}
 
+    private var cache: [InstalledPWA]?
+
     func all() -> [InstalledPWA] {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let items = try? JSONDecoder().decode([InstalledPWA].self, from: data) else { return [] }
+        if let cache { return cache }
+        let items = UserDefaults.standard.data(forKey: key)
+            .flatMap { try? JSONDecoder().decode([InstalledPWA].self, from: $0) } ?? []
+        cache = items
         return items
     }
 
@@ -72,6 +80,8 @@ final class PWAStore {
 
     private func persist(_ items: [InstalledPWA]) {
         if let data = try? JSONEncoder().encode(items) {
+            cache = items
+            PWAIconFactory.clearCache()
             UserDefaults.standard.set(data, forKey: key)
             NotificationCenter.default.post(name: Self.didChange, object: nil)
         }
@@ -88,7 +98,21 @@ final class PWAStore {
 /// builds a tile from the app's name and theme color.
 enum PWAIconFactory {
 
+    private static let cache = NSCache<NSString, UIImage>()
+
+    static func clearCache() { cache.removeAllObjects() }
+
+    /// Cached: decoding the stored PNG and redrawing the tile used to happen
+    /// for every app on every new-tab-page refresh.
     static func icon(for pwa: InstalledPWA, size: CGFloat = 120) -> UIImage {
+        let key = "\(pwa.id)|\(size)" as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        let image = renderIcon(for: pwa, size: size)
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static func renderIcon(for pwa: InstalledPWA, size: CGFloat) -> UIImage {
         if let base64 = pwa.iconPNGBase64, let data = Data(base64Encoded: base64), let image = UIImage(data: data) {
             return roundedTile(size: size, seed: pwa.iconSeed, themeHex: pwa.themeColorHex) { rect in
                 // Fit the real icon inside a themed tile with a little padding.
@@ -144,7 +168,7 @@ enum PWAIconFactory {
     }
 
     private static func paletteColor(seed: Int) -> UIColor {
-        let hue = CGFloat(abs(seed) % 360) / 360
+        let hue = CGFloat((seed % 360 + 360) % 360) / 360
         return UIColor(hue: hue, saturation: 0.55, brightness: 0.72, alpha: 1)
     }
 }

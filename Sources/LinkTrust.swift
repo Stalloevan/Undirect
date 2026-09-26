@@ -123,6 +123,12 @@ final class LinkPagePreviewLoader: NSObject, WKNavigationDelegate {
     private var completion: ((UIImage?, PageSignals?) -> Void)?
     private var timeoutWork: DispatchWorkItem?
     private var settled = false
+    /// Cookies that already existed before the preview loaded. The data
+    /// store is shared with normal browsing, so without this every cookie
+    /// from every site you've visited was counted against the previewed page.
+    private var cookiesBefore: Set<String> = []
+
+    private static func cookieKey(_ c: HTTPCookie) -> String { c.domain + "|" + c.name + "|" + c.path }
 
     /// Tracks resource load failures from the moment the page starts — this
     /// is what actually catches most blocked ads. Scanning the DOM only
@@ -153,6 +159,17 @@ final class LinkPagePreviewLoader: NSObject, WKNavigationDelegate {
         self.completion = completion
         let config = WebEngine.makeConfiguration(tor: isTor)
         ContentBlocker.shared.apply(to: config.userContentController, paused: ContentBlocker.shared.paused.contains(host: url.host))
+        // Same privacy shields as a real tab (fingerprinting, WebRTC, GPC…) —
+        // the preview used to load the page completely unprotected.
+        WebEngine.installScripts(on: config.userContentController, messageName: "undirect_preview", tor: isTor)
+        config.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
+            guard let self else { return }
+            self.cookiesBefore = Set(cookies.map(Self.cookieKey))
+            self.startLoad(url: url, config: config)
+        }
+    }
+
+    private func startLoad(url: URL, config: WKWebViewConfiguration) {
         config.userContentController.addUserScript(WKUserScript(
             source: Self.errorTrackingScript, injectionTime: .atDocumentStart, forMainFrameOnly: false
         ))
@@ -186,7 +203,12 @@ final class LinkPagePreviewLoader: NSObject, WKNavigationDelegate {
             guard let self else { return }
             wv.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
                 let host = wv.url?.host.map(DomainUtil.baseDomain)
-                let thirdParty = cookies.filter { host == nil || DomainUtil.baseDomain($0.domain) != host }.count
+                let before = self.cookiesBefore
+                let thirdParty = cookies.filter { cookie in
+                    guard !before.contains(Self.cookieKey(cookie)) else { return false }
+                    let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+                    return host == nil || DomainUtil.baseDomain(domain) != host
+                }.count
                 let signals = PageSignals(adResourceCount: adCount, thirdPartyCookieCount: thirdParty)
                 let snapConfig = WKSnapshotConfiguration()
                 wv.takeSnapshot(with: snapConfig) { image, _ in

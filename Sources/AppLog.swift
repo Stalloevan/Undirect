@@ -25,7 +25,9 @@ final class AppLog {
         let line = "[\(Self.formatter.string(from: Date()))] [\(category)] \(message)"
         queue.async {
             self.lines.append(line)
-            if self.lines.count > self.maxLines {
+            // Trim in chunks: removing one line from the front of a
+            // 3000-element array on every log call was O(n) each time.
+            if self.lines.count > self.maxLines + 300 {
                 self.lines.removeFirst(self.lines.count - self.maxLines)
             }
         }
@@ -38,7 +40,7 @@ final class AppLog {
             header += "App version: \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))\n"
             header += "Theme: \(Settings.shared.appTheme.rawValue), blocklist: \(Settings.shared.blocklistLevel.rawValue)\n"
             header += "\n"
-            completion(header + self.lines.joined(separator: "\n"))
+            completion(header + self.lines.suffix(self.maxLines).joined(separator: "\n"))
         }
     }
 

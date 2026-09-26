@@ -24,6 +24,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         if Settings.shared.torForNewTabs { TorManager.shared.start() }
         handle(connectionOptions.urlContexts)
         FavoritePreloader.shared.start()
+        // The reputation lists load lazily on first use — which used to be
+        // the main thread, stalling the first link long-press. Warm them here.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+            _ = SiteReputationIndex.categories(for: "warmup.invalid")
+        }
     }
 
     /// Builds (or rebuilds) the whole browser UI against the current theme.

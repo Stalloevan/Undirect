@@ -18,11 +18,15 @@ final class FavoritesStore {
 
     private init() {}
 
+    /// Decoded once and kept in memory — this is read on every NTP refresh
+    /// and page-menu build, and used to re-decode JSON each time.
+    private var cache: [FavoriteSite]?
+
     func all() -> [FavoriteSite] {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
-              let items = try? JSONDecoder().decode([FavoriteSite].self, from: data) else {
-            return []
-        }
+        if let cache { return cache }
+        let items = UserDefaults.standard.data(forKey: defaultsKey)
+            .flatMap { try? JSONDecoder().decode([FavoriteSite].self, from: $0) } ?? []
+        cache = items
         return items
     }
 
@@ -51,6 +55,7 @@ final class FavoritesStore {
 
     private func persist(_ items: [FavoriteSite]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
+        cache = items
         UserDefaults.standard.set(data, forKey: defaultsKey)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
