@@ -1319,7 +1319,9 @@ final class PulloutHandleView: UIView {
 
     func configure(icon: UIImage, isTor: Bool, isLoading: Bool) {
         iconView.image = icon
-        torBadge.isHidden = !isTor
+        // The collapsed pullout handle only ever represents the active tab —
+        // keep it a clean, badge-free icon regardless of Tor state.
+        torBadge.isHidden = true
         iconView.alpha = isLoading ? 0.35 : 1
         if isLoading { spinner.startAnimating() } else { spinner.stopAnimating() }
     }

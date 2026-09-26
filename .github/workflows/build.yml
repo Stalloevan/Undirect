@@ -38,6 +38,23 @@ jobs:
         env:
           TOR_VERSION: v409.12.1
 
+      - name: Stamp version from tag
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0-dev"
+          fi
+          BUILD="${GITHUB_RUN_NUMBER}"
+          echo "Stamping version $VERSION ($BUILD)"
+          sed -i '' -e "s/VERSION_PLACEHOLDER/${VERSION}/g" -e "s/BUILD_PLACEHOLDER/${BUILD}/g" project.yml
+          if grep -q "VERSION_PLACEHOLDER\|BUILD_PLACEHOLDER" project.yml; then
+            echo "::error::Version stamping failed, placeholders still present in project.yml"
+            exit 1
+          fi
+          grep -n "MARKETING_VERSION\|CURRENT_PROJECT_VERSION" project.yml
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
