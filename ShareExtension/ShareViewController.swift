@@ -7,34 +7,19 @@ import UniformTypeIdentifiers
 /// pasted into Undirect's address bar — never a silent dead end.
 final class ShareViewController: UIViewController {
 
-    private let card = UIView()
-    private let label = UILabel()
-    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let messageLabel = PaddedMessageLabel()
+    private var settled = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.25)
-        card.backgroundColor = .secondarySystemBackground
-        card.layer.cornerRadius = 16
-        label.text = "Opening in Undirect…"
-        label.font = .systemFont(ofSize: 16, weight: .medium)
-        label.textAlignment = .center
-        label.numberOfLines = 0
-        spinner.startAnimating()
-        let stack = UIStackView(arrangedSubviews: [spinner, label])
-        stack.axis = .vertical
-        stack.spacing = 10
-        for v in [card, stack] as [UIView] { v.translatesAutoresizingMaskIntoConstraints = false }
-        view.addSubview(card)
-        card.addSubview(stack)
+        view.backgroundColor = .clear
+        messageLabel.isHidden = true
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(messageLabel)
         NSLayoutConstraint.activate([
-            card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            card.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            card.widthAnchor.constraint(equalToConstant: 260),
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16)
+            messageLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            messageLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            messageLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 280)
         ])
     }
 
@@ -46,7 +31,19 @@ final class ShareViewController: UIViewController {
                 self.finish(message: "Nothing to open here.")
                 return
             }
-            self.openHostApp(url) { opened in
+            // If iOS never answers, don't hang: treat silence as a refusal.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.handleOpenResult(false, payload: payload)
+            }
+            self.openHostApp(url) { [weak self] opened in
+                self?.handleOpenResult(opened, payload: payload)
+            }
+        }
+    }
+
+    private func handleOpenResult(_ opened: Bool, payload: Payload) {
+        guard !settled else { return }
+        settled = true
                 if opened {
                     // Leave a moment for the hand-off before the extension is torn down.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -59,13 +56,11 @@ final class ShareViewController: UIViewController {
                     }
                     self.finish(message: "Couldn't open Undirect directly — the link is copied. Paste it into Undirect's address bar.")
                 }
-            }
-        }
     }
 
     private func finish(message: String) {
-        spinner.stopAnimating()
-        label.text = message
+        messageLabel.text = message
+        messageLabel.isHidden = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
             self.extensionContext?.completeRequest(returningItems: nil)
         }
@@ -120,7 +115,11 @@ final class ShareViewController: UIViewController {
         typealias OpenFunction = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, AnyObject?) -> Void
         var responder: UIResponder? = self
         while let current = responder {
-            if current.responds(to: selector), let implementation = current.method(for: selector) {
+            // Only the actual application object: some of the share sheet's
+            // own internal responders also answer to this selector but just
+            // swallow the request, which is what left the spinner hanging.
+            if current is UIApplication, current.responds(to: selector),
+               let implementation = current.method(for: selector) {
                 let open = unsafeBitCast(implementation, to: OpenFunction.self)
                 let callback: @convention(block) (Bool) -> Void = { ok in
                     DispatchQueue.main.async { completion(ok) }
@@ -131,5 +130,24 @@ final class ShareViewController: UIViewController {
             responder = current.next
         }
         completion(false)
+    }
+}
+
+private final class PaddedMessageLabel: UILabel {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        font = .systemFont(ofSize: 15, weight: .medium)
+        textAlignment = .center
+        numberOfLines = 0
+        textColor = .label
+        backgroundColor = .secondarySystemBackground
+        layer.cornerRadius = 14
+        clipsToBounds = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func drawText(in rect: CGRect) { super.drawText(in: rect.insetBy(dx: 16, dy: 14)) }
+    override var intrinsicContentSize: CGSize {
+        let s = super.intrinsicContentSize
+        return CGSize(width: s.width + 32, height: s.height + 28)
     }
 }
