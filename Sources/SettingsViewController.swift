@@ -126,10 +126,7 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Hide common ad slots", kind: .toggle(get: { s.cosmeticFiltering }, set: { s.cosmeticFiltering = $0; blockingChanged() })),
                 SettingsRow(title: "Remove link tracking", kind: .toggle(get: { s.stripTrackers }, set: { s.stripTrackers = $0 })),
                 SettingsRow(title: "Click through redirect layers", kind: .toggle(get: { s.clickThrough }, set: { s.clickThrough = $0 })),
-                SettingsRow(title: "Sites with blocking paused", kind: .push({
-                    DomainListViewController(title: "Blocking Paused", store: ContentBlocker.shared.paused,
-                                             footer: "Ads and trackers are allowed on these sites.")
-                })),
+                SettingsRow(title: "Site exceptions (trusted & paused)", kind: .push({ SiteExceptionsViewController() })),
                 SettingsRow(title: "Hidden elements", kind: .push({ HiddenElementsViewController() }))
             ]),
             SettingsSection(title: "Anti-tracking", footer: "Fingerprinting protection adds tiny, per-site noise to canvas, WebGL, and audio read-backs and reports common hardware values, so sites can't build a stable ID from your device. Blocking WebRTC stops sites discovering your real IP address, but also breaks video calls in the browser.", rows: [
@@ -180,7 +177,6 @@ final class SettingsViewController: SettingsTableViewController {
                     vc.onOpen = self?.onOpenFavorite
                     return vc
                 })),
-                SettingsRow(title: "Trusted sites (redirects & pop-ups)", kind: .push({ WhitelistViewController() })),
                 SettingsRow(title: "Reset blocking statistics", kind: .action({ BlockStats.shared.reset() }), destructive: true)
             ]),
             SettingsSection(title: "Diagnostics", footer: "A rolling log of blocked redirects/pop-ups, Tor status, and navigation errors, kept only on this device. Export creates a text file you choose where to send.", rows: [

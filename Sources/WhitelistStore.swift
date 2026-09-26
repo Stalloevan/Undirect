@@ -5,6 +5,7 @@ import Foundation
 final class WhitelistStore {
 
     static let shared = WhitelistStore()
+    static let didChange = Notification.Name("UndirectWhitelistDidChange")
 
     private let defaultsKey = "com.stalloevan.undirect.whitelist"
     private var domains: Set<String>
@@ -35,8 +36,12 @@ final class WhitelistStore {
         persist()
     }
 
+    /// Removes every entry that makes `host` trusted — the host itself and
+    /// any parent domain. (Removing only the exact host left a site trusted
+    /// when the trust came from its parent, so "Untrust" did nothing.)
     func remove(host: String) {
-        domains.remove(Self.normalize(host))
+        let h = Self.normalize(host)
+        domains = domains.filter { !(h == $0 || h.hasSuffix("." + $0)) }
         persist()
     }
 
@@ -46,5 +51,6 @@ final class WhitelistStore {
 
     private func persist() {
         UserDefaults.standard.set(Array(domains), forKey: defaultsKey)
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 }

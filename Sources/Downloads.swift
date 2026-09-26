@@ -15,7 +15,7 @@ import UniformTypeIdentifiers
 /// app", which brings up the system share sheet already holding the file so
 /// sending it to an app is a single tap.
 enum DownloadAction: String, Codable, CaseIterable {
-    case ask, keep, folder, openIn, chooseLocation, photos, preview
+    case ask, keep, folder, openIn, chooseLocation, photos, preview, sendToApp
 
     var title: String {
         switch self {
@@ -26,6 +26,7 @@ enum DownloadAction: String, Codable, CaseIterable {
         case .chooseLocation: return "Pick a location each time"
         case .photos: return "Photos library"
         case .preview: return "Preview in Undirect"
+        case .sendToApp: return "Send to a specific app…"
         }
     }
 
@@ -38,6 +39,7 @@ enum DownloadAction: String, Codable, CaseIterable {
         case .chooseLocation: return "Pick location"
         case .photos: return "Photos"
         case .preview: return "Preview"
+        case .sendToApp: return "App"
         }
     }
 }
@@ -50,9 +52,14 @@ struct DownloadRule: Codable, Equatable {
     var action: DownloadAction
     var folderBookmark: Data?
     var folderName: String?
+    /// For .sendToApp: display name and URL template (%u = link, encoded;
+    /// %r = link, raw).
+    var appName: String?
+    var appTemplate: String?
 
     var summary: String {
         if action == .folder, let folderName { return "→ \(folderName)" }
+        if action == .sendToApp, let appName { return "→ \(appName)" }
         return action.shortTitle
     }
 
@@ -98,6 +105,30 @@ struct DownloadPreset {
         DownloadPreset(name: "Torrents", patterns: ["application/x-bittorrent"]),
         DownloadPreset(name: "iOS apps (IPA)", patterns: ["application/x-ios-app", "application/octet-stream+ipa"])
     ]
+}
+
+/// Apps that accept a web link through their URL scheme. The link is handed
+/// over *instead of* downloading — the app fetches or streams it itself, so
+/// the file goes straight there with no share sheet.
+struct AppTarget {
+    let name: String
+    let template: String
+
+    static let presets: [AppTarget] = [
+        AppTarget(name: "VLC (stream)", template: "vlc-x-callback://x-callback-url/stream?url=%u"),
+        AppTarget(name: "VLC (download into VLC)", template: "vlc-x-callback://x-callback-url/download?url=%u"),
+        AppTarget(name: "Infuse", template: "infuse://x-callback-url/play?url=%u"),
+        AppTarget(name: "nPlayer", template: "nplayer-%r")
+    ]
+
+    static func expand(_ template: String, with url: URL) -> URL? {
+        let strict = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let encoded = url.absoluteString.addingPercentEncoding(withAllowedCharacters: strict) ?? url.absoluteString
+        let filled = template
+            .replacingOccurrences(of: "%u", with: encoded)
+            .replacingOccurrences(of: "%r", with: url.absoluteString)
+        return URL(string: filled)
+    }
 }
 
 final class DownloadRuleStore {
@@ -247,6 +278,10 @@ final class DownloadManager: NSObject {
             saveToPhotos(fileURL: fileURL, filename: filename, mime: mime)
         case .preview:
             if let saved = moveToDownloads(fileURL, filename: filename) { presentPreview(saved) }
+        case .sendToApp:
+            // Only reached when the link couldn't be handed over (a Tor tab,
+            // a page-generated file, or the app didn't answer).
+            presentChoices(fileURL: fileURL, filename: filename, mime: mime)
         }
     }
 
@@ -460,6 +495,38 @@ extension DownloadManager: WKDownloadDelegate {
                   suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         let filename = Self.sanitize(suggestedFilename)
         let mime = Self.resolveMIME(response.mimeType, filename: filename)
+        let id = ObjectIdentifier(download)
+        let isTor = active[id]?.isTor ?? false
+        let rule = DownloadRuleStore.shared.rule(for: mime, filename: filename)
+
+        // "Send to a specific app": hand the link over before downloading
+        // anything. Never for Tor tabs — the other app would fetch it outside
+        // Tor — and only for real web links (not page-generated blob:/data:).
+        if rule.action == .sendToApp, let template = rule.appTemplate,
+           let source = response.url ?? download.originalRequest?.url,
+           ["http", "https"].contains(source.scheme?.lowercased() ?? "") {
+            if isTor {
+                toast("Tor download — not sent to \(rule.appName ?? "the app") so it stays on Tor")
+            } else if let appURL = AppTarget.expand(template, with: source) {
+                UIApplication.shared.open(appURL) { [weak self] opened in
+                    guard let self else { return }
+                    if opened {
+                        AppLog.shared.log("Sent \(filename) to \(rule.appName ?? "app")", category: "download")
+                        self.active.removeValue(forKey: id)
+                        completionHandler(nil) // cancels the download in Undirect
+                    } else {
+                        self.toast("Couldn't open \(rule.appName ?? "that app") — is it installed? Downloading instead")
+                        self.startDownload(id: id, filename: filename, mime: mime, completionHandler: completionHandler)
+                    }
+                }
+                return
+            }
+        }
+        startDownload(id: id, filename: filename, mime: mime, completionHandler: completionHandler)
+    }
+
+    private func startDownload(id: ObjectIdentifier, filename: String, mime: String,
+                               completionHandler: @escaping (URL?) -> Void) {
         let folder = Self.stagingFolder.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -468,7 +535,6 @@ extension DownloadManager: WKDownloadDelegate {
             return
         }
         let dest = folder.appendingPathComponent(filename)
-        let id = ObjectIdentifier(download)
         var info = active[id] ?? Active(fileURL: nil, filename: filename, mime: mime, isTor: false)
         info.fileURL = dest
         info.filename = filename
@@ -549,7 +615,7 @@ final class DownloadSettingsViewController: UITableViewController {
         case 0:
             return "The most specific match wins (e.g. “application/pdf” beats “*/*”). Tap a rule to change where it goes, swipe to delete."
         case 1:
-            return "iOS doesn't let apps silently send a file into a specific other app. “A folder I choose…” is the closest: pick another app's folder in Files (for example On My iPhone › VLC) and matching files go straight there. “Open in app” shows the share sheet with the file ready, so sending it is one tap."
+            return "“Send to a specific app” hands the link straight to the app you pick (VLC, Infuse, nPlayer, a Shortcut, or any app with a URL scheme). “A folder I choose…” saves into another app's folder in Files (e.g. On My iPhone › VLC). “Open in app” shows the share sheet with the file ready."
         default:
             return "Undirect Downloads is visible in the Files app under On My iPhone › Undirect."
         }
@@ -675,9 +741,13 @@ final class DownloadSettingsViewController: UITableViewController {
                 updated.action = action
                 if action == .folder {
                     self?.pickFolder(for: updated)
+                } else if action == .sendToApp {
+                    self?.pickApp(for: updated)
                 } else {
                     updated.folderBookmark = nil
                     updated.folderName = nil
+                    updated.appName = nil
+                    updated.appTemplate = nil
                     DownloadRuleStore.shared.upsert(updated)
                 }
             })
@@ -690,6 +760,61 @@ final class DownloadSettingsViewController: UITableViewController {
             DownloadManager.anchor(sheet, in: self)
         }
         present(sheet, animated: true)
+    }
+
+    private func pickApp(for rule: DownloadRule) {
+        let sheet = UIAlertController(title: "Send \(rule.name) to…",
+                                      message: "The link is handed to the app, which downloads or streams it itself — no share sheet. Sites that need you to be logged in may not work, and Tor tabs always download inside Undirect.",
+                                      preferredStyle: .actionSheet)
+        func save(_ name: String, _ template: String) {
+            var updated = rule
+            updated.appName = name
+            updated.appTemplate = template
+            updated.folderBookmark = nil
+            updated.folderName = nil
+            DownloadRuleStore.shared.upsert(updated)
+        }
+        for target in AppTarget.presets {
+            sheet.addAction(UIAlertAction(title: target.name, style: .default) { _ in save(target.name, target.template) })
+        }
+        sheet.addAction(UIAlertAction(title: "A Shortcut…", style: .default) { [weak self] _ in
+            self?.promptText(title: "Run a Shortcut",
+                             message: "Enter the exact name of the shortcut. It receives the link as text input, so it can send it to any app.",
+                             placeholder: "Shortcut name") { name in
+                let encodedName = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? name
+                save("Shortcut “\(name)”", "shortcuts://run-shortcut?name=\(encodedName)&input=text&text=%u")
+            }
+        })
+        sheet.addAction(UIAlertAction(title: "Custom URL scheme…", style: .default) { [weak self] _ in
+            self?.promptText(title: "Custom app URL",
+                             message: "Use %u for the link (encoded) or %r for the link as-is, e.g. myapp://open?url=%u",
+                             placeholder: "myapp://open?url=%u") { template in
+                guard template.contains("%u") || template.contains("%r"),
+                      let scheme = template.split(separator: ":").first, !scheme.isEmpty else {
+                    self?.alert("That needs a scheme (like myapp://) and %u or %r where the link goes.")
+                    return
+                }
+                save(String(scheme), template)
+            }
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        DownloadManager.anchor(sheet, in: self)
+        present(sheet, animated: true)
+    }
+
+    private func promptText(title: String, message: String, placeholder: String, done: @escaping (String) -> Void) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addTextField { f in
+            f.placeholder = placeholder
+            f.autocapitalizationType = .none
+            f.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak alert] _ in
+            let text = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !text.isEmpty { done(text) }
+        })
+        present(alert, animated: true)
     }
 
     private func pickFolder(for rule: DownloadRule) {

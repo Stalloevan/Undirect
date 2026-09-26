@@ -451,9 +451,17 @@ final class DomainSetStore {
         persist()
     }
 
+    /// Adds exactly this host (still matching its subdomains), rather than
+    /// widening it to the registrable domain like `add` does.
+    func addExact(host: String) {
+        domains.insert(DomainUtil.normalize(host))
+        persist()
+    }
+
+    /// Removes every entry that covers `host` (itself or a parent domain).
     func remove(host: String) {
-        domains.remove(DomainUtil.baseDomain(host))
-        domains.remove(DomainUtil.normalize(host))
+        let h = DomainUtil.normalize(host)
+        domains = domains.filter { !(h == $0 || h.hasSuffix("." + $0)) }
         persist()
     }
 
