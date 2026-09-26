@@ -1,5 +1,6 @@
 import Foundation
 import WebKit
+import CryptoKit
 
 /// Pi-hole-style domain blocking, applied to the browser's own traffic.
 ///
@@ -58,9 +59,20 @@ final class ContentBlocker {
         "/pagead\\.js", "/ads\\.js", "/widget/ads\\.", "/ad-loader\\.js", "/ad-manager\\.js"
     ]
 
-    private var buildVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "0"
+    /// Bump when the JSON *format* produced below changes.
+    private static let rulesFormat = "r2"
+
+    /// Cache keys come from the content itself, not the build number, so an
+    /// app update that doesn't touch the lists reuses the already-compiled
+    /// rules instead of recompiling tens of thousands of them at launch.
+    private static func contentKey(_ text: String) -> String {
+        let digest = SHA256.hash(data: Data(text.utf8))
+        return rulesFormat + "-" + digest.prefix(6).map { String(format: "%02x", $0) }.joined()
     }
+
+    private static let staticRulesKey: String = contentKey(
+        cosmeticSelectors.joined() + shieldDomains.joined() + blockedScriptPatterns.joined()
+    )
 
     /// Returns true if `host` or any parent domain is on the active list.
     func isBlocked(host: String?) -> Bool {
@@ -82,14 +94,15 @@ final class ContentBlocker {
         let cosmetic = Settings.shared.cosmeticFiltering
         let cookies = Settings.shared.blockThirdPartyCookies
         let shields = Settings.shared.blockIPLookups
-        let version = buildVersion
         isCompiling = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             var domains: [String] = []
+            var version = Self.staticRulesKey
             if let name = level.resourceName,
                let url = Bundle.main.url(forResource: name, withExtension: "txt"),
                let text = try? String(contentsOf: url, encoding: .utf8) {
+                version = Self.contentKey(text)
                 domains = text.split(whereSeparator: \.isNewline)
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty && !$0.hasPrefix("#") && Self.isPlainDomain($0) }
@@ -106,17 +119,18 @@ final class ContentBlocker {
                 index += 1
                 start = end
             }
+            let fixed = Self.staticRulesKey
             if cosmetic {
-                specs.append(("undirect-cosmetic-b\(version)", { Self.cosmeticJSON() }))
+                specs.append(("undirect-cosmetic-b\(fixed)", { Self.cosmeticJSON() }))
             }
             if level != .off {
-                specs.append(("undirect-scriptpatterns-b\(version)", { Self.scriptPatternJSON() }))
+                specs.append(("undirect-scriptpatterns-b\(fixed)", { Self.scriptPatternJSON() }))
             }
             if shields {
-                specs.append(("undirect-shields-b\(version)", { Self.shieldJSON() }))
+                specs.append(("undirect-shields-b\(fixed)", { Self.shieldJSON() }))
             }
             if cookies {
-                specs.append(("undirect-3pcookies-b\(version)", { Self.thirdPartyCookieJSON() }))
+                specs.append(("undirect-3pcookies-b\(fixed)", { Self.thirdPartyCookieJSON() }))
             }
             let set = Set(domains)
 
@@ -167,8 +181,9 @@ final class ContentBlocker {
         guard let store = WKContentRuleListStore.default() else { return }
         store.getAvailableContentRuleListIdentifiers { ids in
             for id in ids ?? [] where id.hasPrefix("undirect-") && !keeping.contains(id) {
-                // Keep other levels of the same build cached so switching back is instant.
-                if id.hasSuffix("-b\(self.buildVersion)") { continue }
+                // Keep other blocklist levels in the current format cached so
+                // switching back is instant; drop everything older.
+                if id.contains("-b\(Self.rulesFormat)-") { continue }
                 store.removeContentRuleList(forIdentifier: id) { _ in }
             }
         }

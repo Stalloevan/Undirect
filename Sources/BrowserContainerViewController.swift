@@ -62,6 +62,19 @@ final class BrowserContainerViewController: UIViewController {
     private var detectedManifest: WebAppManifest?
     private var shownInstallPromptFor: Set<String> = []
 
+    /// Links handed to us from outside (share sheet, other apps, Shortcuts)
+    /// before the saved session has been restored — opened right after it,
+    /// so a cold launch from the share sheet can't lose them.
+    private var pendingExternalURLs: [URL] = []
+    private var sessionRestored = false
+
+    /// Coalesces the flood of per-tab KVO changes (progress ticks, title,
+    /// loading…) from every open tab into at most one UI pass per run loop.
+    private var chromeUpdateScheduled = false
+    private var lastSidebarSignature: [String] = []
+    private var ntpWasVisible = false
+    private var lastScriptSettingsSignature = WebEngine.scriptSettingsSignature()
+
     // MARK: Lifecycle
 
     override func viewDidLoad() {
@@ -97,6 +110,8 @@ final class BrowserContainerViewController: UIViewController {
         nc.addObserver(self, selector: #selector(updateChrome), name: FavoritesStore.didChange, object: nil)
         nc.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
         nc.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        nc.addObserver(self, selector: #selector(downloadToast(_:)), name: DownloadManager.toastNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleMemoryWarning), name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
 
         setupPageInteractionAutoHide()
         NotificationCenter.default.addObserver(self, selector: #selector(handleImmersiveRequest(_:)),
@@ -118,6 +133,36 @@ final class BrowserContainerViewController: UIViewController {
             DispatchQueue.main.async { [weak self] in self?.openTab(url: nil, tor: pendingTor) }
         }
         restoreSession()
+        sessionRestored = true
+        let queued = pendingExternalURLs
+        pendingExternalURLs = []
+        for url in queued { openTab(url: url) }
+    }
+
+    /// Entry point for links from other apps. Safe to call at any point in
+    /// the launch sequence.
+    func openExternal(_ url: URL) {
+        guard sessionRestored else {
+            pendingExternalURLs.append(url)
+            return
+        }
+        // Don't let a presented sheet/settings screen hide the new tab.
+        if presentedViewController != nil, !(presentedViewController is ImmersiveViewController) {
+            dismiss(animated: false)
+        }
+        navigationController?.popToRootViewController(animated: false)
+        openTab(url: url)
+    }
+
+    @objc private func downloadToast(_ note: Notification) {
+        guard let message = note.object as? String else { return }
+        showToast(message)
+    }
+
+    /// Background tabs' web views are the bulk of memory; iOS already kills
+    /// their content processes under pressure, but our own caches go too.
+    @objc private func handleMemoryWarning() {
+        for tab in tabs where tab !== currentTab { tab.dropCaches() }
     }
 
     override func viewDidLayoutSubviews() {
@@ -362,6 +407,7 @@ final class BrowserContainerViewController: UIViewController {
         pulloutHandle.isHidden = state != .hidden
         sidebarWidth.constant = state == .full ? TabSidebarView.fullWidth : state == .minimal ? TabSidebarView.minimalWidth : 0
         if state != .hidden { sidebar.setMode(state == .full ? .full : .minimal) }
+        lastSidebarSignature = []
         refreshSidebar()
 
         if animated {
@@ -600,7 +646,7 @@ final class BrowserContainerViewController: UIViewController {
     }
 
     private func makeTab(tor: Bool, id: UUID = UUID(), popupConfiguration: WKWebViewConfiguration? = nil) -> Tab {
-        if tor { TorManager.shared.start() }
+        if tor { TorManager.shared.ensureRunning() }
         let tab = Tab(isTor: tor, popupConfiguration: popupConfiguration, id: id)
         tab.delegate = self
         return tab
@@ -692,6 +738,16 @@ final class BrowserContainerViewController: UIViewController {
 
     // MARK: Chrome updates
 
+    private func setNeedsChromeUpdate() {
+        guard !chromeUpdateScheduled else { return }
+        chromeUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.chromeUpdateScheduled = false
+            self.updateChrome()
+        }
+    }
+
     @objc private func updateChrome() {
         guard isViewLoaded, let tab = currentTab else { return }
 
@@ -729,7 +785,10 @@ final class BrowserContainerViewController: UIViewController {
         progressView.isHidden = !tab.webView.isLoading
 
         ntp.view.isHidden = !tab.isBlank
-        if !ntp.view.isHidden { ntp.reload() }
+        // The NTP keeps itself current via its own observers; it only needs
+        // an explicit refresh when it comes (back) on screen.
+        if !ntp.view.isHidden && !ntpWasVisible { ntp.reload() }
+        ntpWasVisible = !ntp.view.isHidden
 
         torOverlay.isHidden = !tab.isWaitingForTor
         torOverlay.update(state: TorManager.shared.state)
@@ -739,10 +798,19 @@ final class BrowserContainerViewController: UIViewController {
     }
 
     private func refreshSidebar() {
-        sidebar.update(items: tabs.enumerated().map { index, tab in
+        let items = tabs.enumerated().map { index, tab in
             SidebarItem(icon: tab.icon, title: tab.title, isTor: tab.isTor,
                         isSelected: index == selectedIndex, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
-        })
+        }
+        // Skip the table reload entirely when nothing visible changed (the
+        // common case during a page load: only progress moved).
+        let signature = items.map {
+            "\(ObjectIdentifier($0.icon).hashValue)|\($0.title)|\($0.isTor)|\($0.isSelected)|\($0.isLoading)"
+        } + ["\(sidebarState)"]
+        if signature != lastSidebarSignature {
+            lastSidebarSignature = signature
+            sidebar.update(items: items)
+        }
         if let tab = currentTab {
             pulloutHandle.configure(icon: tab.icon, isTor: tab.isTor, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
         }
@@ -758,6 +826,11 @@ final class BrowserContainerViewController: UIViewController {
 
     @objc private func settingsChanged() {
         applySidebarPosition()
+        // Only settings that feed the injected scripts need a reinstall on
+        // every tab (it used to happen for any change, e.g. NTP columns).
+        let signature = WebEngine.scriptSettingsSignature()
+        guard signature != lastScriptSettingsSignature else { return }
+        lastScriptSettingsSignature = signature
         for tab in tabs { tab.reinstallScripts() }
     }
 
@@ -990,9 +1063,7 @@ final class BrowserContainerViewController: UIViewController {
         func tryNext() {
             guard !remaining.isEmpty else { completion(nil); return }
             let url = remaining.removeFirst()
-            let config = URLSessionConfiguration.ephemeral
-            config.timeoutIntervalForRequest = 8
-            URLSession(configuration: config).dataTask(with: url) { data, response, _ in
+            Self.iconSession.dataTask(with: url) { data, response, _ in
                 if let data, (response as? HTTPURLResponse)?.statusCode ?? 0 < 400, UIImage(data: data) != nil {
                     // Re-encode to PNG at a reasonable size to bound storage.
                     if let image = UIImage(data: data) {
@@ -1009,6 +1080,14 @@ final class BrowserContainerViewController: UIViewController {
         }
         tryNext()
     }
+
+    /// One session for all icon fetches (a new URLSession per request was
+    /// never invalidated, leaking its delegate queue and connection pool).
+    private static let iconSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        return URLSession(configuration: config)
+    }()
 
     func launchPWA(_ pwa: InstalledPWA) {
         guard let url = pwa.startURLValue else { return }
@@ -1116,7 +1195,7 @@ extension BrowserContainerViewController: TabSidebarDelegate {
 
 extension BrowserContainerViewController: TabDelegate {
     func tabDidChange(_ tab: Tab) {
-        if tab === currentTab { updateChrome() } else { refreshSidebar() }
+        setNeedsChromeUpdate()
         schedulePersist()
     }
 
@@ -1246,6 +1325,9 @@ final class TorConnectingView: UIView {
             label.text = "Connecting to Tor…"
             progress.setProgress(Float(p) / 100, animated: true)
             progress.isHidden = false
+        case .reconnecting:
+            label.text = "Reconnecting to Tor…"
+            progress.isHidden = true
         case .failed(let why):
             label.text = "Tor couldn't connect (\(why))."
             progress.isHidden = true

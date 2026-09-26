@@ -43,6 +43,10 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # Downloads kept in Undirect show up in Files › On My iPhone › Undirect.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSPhotoLibraryAddUsageDescription: "Undirect saves downloaded photos and videos to your library when a download rule says to."
         CFBundleURLTypes:
           - CFBundleURLName: com.stalloevan.undirect
             CFBundleURLSchemes:
@@ -72,9 +76,16 @@ targets:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
           NSExtensionAttributes:
-            NSExtensionActivationRule:
-              NSExtensionActivationSupportsWebURLWithMaxCount: 1
-              NSExtensionActivationSupportsText: true
+            # Show up whenever *any* shared attachment is a web link or text —
+            # the dictionary form hid Undirect whenever an app shared a link
+            # together with something else (an image preview, a title, …).
+            NSExtensionActivationRule: >-
+              SUBQUERY(extensionItems, $extensionItem,
+              SUBQUERY($extensionItem.attachments, $attachment,
+              (ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.url"
+              AND NOT (ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url"))
+              OR ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.plain-text"
+              ).@count >= 1).@count >= 1
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stalloevan.undirect.share

@@ -1,14 +1,19 @@
 import UIKit
 import UniformTypeIdentifiers
 
-/// "Open in Undirect" in the share sheet: takes the shared link (or text),
-/// hands it to the main app through its undirect:// URL scheme, and closes.
-/// If iOS refuses the hand-off, the link is copied instead so it can be
-/// pasted into Undirect's address bar — never a silent dead end.
+/// "Open in Undirect" in the share sheet: finds the best link in whatever the
+/// other app shared, hands it to the main app through its undirect:// URL
+/// scheme, and closes. If iOS refuses the hand-off, the link is copied
+/// instead so it can be pasted into Undirect's address bar — never a silent
+/// dead end.
 final class ShareViewController: UIViewController {
 
     private let messageLabel = PaddedMessageLabel()
     private var settled = false
+    /// The sharing app goes to the background when Undirect comes forward —
+    /// the most reliable sign the hand-off worked, even when iOS is slow to
+    /// call the open completion during a cold launch.
+    private var hostWentToBackground = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -21,6 +26,12 @@ final class ShareViewController: UIViewController {
             messageLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             messageLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 280)
         ])
+        NotificationCenter.default.addObserver(self, selector: #selector(hostDidEnterBackground),
+                                               name: .NSExtensionHostDidEnterBackground, object: nil)
+    }
+
+    @objc private func hostDidEnterBackground() {
+        hostWentToBackground = true
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -31,12 +42,23 @@ final class ShareViewController: UIViewController {
                 self.finish(message: "Nothing to open here.")
                 return
             }
-            // If iOS never answers, don't hang: treat silence as a refusal.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.handleOpenResult(false, payload: payload)
+            // A cold launch of Undirect can take a few seconds to answer.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                guard let self else { return }
+                self.handleOpenResult(self.hostWentToBackground, payload: payload)
             }
             self.openHostApp(url) { [weak self] opened in
-                self?.handleOpenResult(opened, payload: payload)
+                guard let self else { return }
+                if opened || self.hostWentToBackground {
+                    self.handleOpenResult(true, payload: payload)
+                } else {
+                    // A "no" can arrive before the app switch registers;
+                    // give it a moment before calling it a failure.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                        guard let self else { return }
+                        self.handleOpenResult(self.hostWentToBackground, payload: payload)
+                    }
+                }
             }
         }
     }
@@ -44,18 +66,18 @@ final class ShareViewController: UIViewController {
     private func handleOpenResult(_ opened: Bool, payload: Payload) {
         guard !settled else { return }
         settled = true
-                if opened {
-                    // Leave a moment for the hand-off before the extension is torn down.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        self.extensionContext?.completeRequest(returningItems: nil)
-                    }
-                } else {
-                    switch payload {
-                    case .url(let link): UIPasteboard.general.url = link
-                    case .text(let text): UIPasteboard.general.string = text
-                    }
-                    self.finish(message: "Couldn't open Undirect directly — the link is copied. Paste it into Undirect's address bar.")
-                }
+        if opened {
+            // Leave a moment for the hand-off before the extension is torn down.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.extensionContext?.completeRequest(returningItems: nil)
+            }
+        } else {
+            switch payload {
+            case .url(let link): UIPasteboard.general.url = link
+            case .text(let text): UIPasteboard.general.string = text
+            }
+            finish(message: "Couldn't open Undirect directly — the link is copied. Paste it into Undirect's address bar.")
+        }
     }
 
     private func finish(message: String) {
@@ -68,42 +90,94 @@ final class ShareViewController: UIViewController {
 
     private enum Payload { case url(URL), text(String) }
 
+    // MARK: Extraction
+
+    /// Apps share links in wildly different shapes: a proper URL item, a URL
+    /// plus an image, plain text with a link somewhere inside, the link only
+    /// in the item's attributed text, or a URL delivered as a string or raw
+    /// data. Everything is collected and the first real web link wins; text
+    /// is only used when there's no link at all.
     private func extractSharedItem(completion: @escaping (Payload?) -> Void) {
-        let providers = (extensionContext?.inputItems as? [NSExtensionItem] ?? [])
-            .flatMap { $0.attachments ?? [] }
+        let items = extensionContext?.inputItems as? [NSExtensionItem] ?? []
+        let collector = ShareCollector()
+        let group = DispatchGroup()
 
-        if let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.url.identifier) }) {
-            provider.loadItem(forTypeIdentifier: UTType.url.identifier) { item, _ in
-                var url: URL?
-                if let u = item as? URL { url = u }
-                else if let u = item as? NSURL { url = u as URL }
-                else if let data = item as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
-                else if let str = item as? String { url = URL(string: str) }
-                let resolved = url
-                DispatchQueue.main.async { completion(resolved.map(Payload.url)) }
+        for item in items {
+            collector.add(text: item.attributedContentText?.string)
+            collector.add(text: item.attributedTitle?.string)
+            for provider in item.attachments ?? [] {
+                if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                    group.enter()
+                    provider.loadItem(forTypeIdentifier: UTType.url.identifier) { value, _ in
+                        if let url = Self.coerceURL(value), Self.isWeb(url) { collector.add(url: url) }
+                        if let s = value as? String { collector.add(text: s) }
+                        group.leave()
+                    }
+                }
+                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+                    group.enter()
+                    provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) { value, _ in
+                        collector.add(text: (value as? String) ?? (value as? NSAttributedString)?.string
+                                      ?? (value as? Data).flatMap { String(data: $0, encoding: .utf8) })
+                        group.leave()
+                    }
+                }
             }
-            return
         }
-        if let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }) {
-            provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) { item, _ in
-                let text = (item as? String) ?? (item as? NSAttributedString)?.string
-                DispatchQueue.main.async { completion(text.map(Payload.text)) }
+
+        let deliver = {
+            // Runs once: whichever comes first of "all loaded" or the timeout
+            // (some providers never call back).
+            guard collector.claimDelivery() else { return }
+            let (urls, texts) = collector.snapshot()
+            if let url = urls.first { completion(.url(url)); return }
+            for text in texts {
+                if let url = Self.firstWebLink(in: text) { completion(.url(url)); return }
             }
-            return
+            completion(texts.first.map(Payload.text))
         }
-        completion(nil)
+        group.notify(queue: .main, execute: deliver)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: deliver)
     }
 
+    private static func coerceURL(_ value: NSSecureCoding?) -> URL? {
+        if let u = value as? URL { return u }
+        if let u = value as? NSURL { return u as URL }
+        if let s = value as? String { return URL(string: s.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if let data = value as? Data {
+            if let u = URL(dataRepresentation: data, relativeTo: nil), isWeb(u) { return u }
+            if let s = String(data: data, encoding: .utf8) { return URL(string: s.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        }
+        return nil
+    }
+
+    private static func isWeb(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return (scheme == "http" || scheme == "https") && url.host != nil
+    }
+
+    private static func firstWebLink(in text: String) -> URL? {
+        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        return detector?.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .compactMap(\.url).first(where: isWeb)
+    }
+
+    /// The link rides inside our own URL, so it's encoded with a strict set:
+    /// a shared link's own `&`, `=`, `#`, `+` or `%` must survive untouched.
     private static func handoffURL(for payload: Payload) -> URL? {
-        var comps = URLComponents()
-        comps.scheme = "undirect"
-        comps.host = "open"
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let pair: (key: String, value: String)
         switch payload {
-        case .url(let url): comps.queryItems = [URLQueryItem(name: "url", value: url.absoluteString)]
-        case .text(let text): comps.queryItems = [URLQueryItem(name: "text", value: text)]
+        case .url(let url): pair = ("url", url.absoluteString)
+        case .text(let text): pair = ("text", String(text.prefix(4000)))
         }
-        return comps.url
+        let key = pair.key
+        let value = pair.value
+        guard let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: "undirect://open?\(key)=\(encoded)")
     }
+
+    // MARK: Hand-off
 
     /// Extensions can't call UIApplication.open directly (it's marked
     /// extension-unavailable), but the extension process's application object
@@ -117,7 +191,7 @@ final class ShareViewController: UIViewController {
         while let current = responder {
             // Only the actual application object: some of the share sheet's
             // own internal responders also answer to this selector but just
-            // swallow the request, which is what left the spinner hanging.
+            // swallow the request.
             if current is UIApplication, current.responds(to: selector),
                let implementation = current.method(for: selector) {
                 let open = unsafeBitCast(implementation, to: OpenFunction.self)
@@ -130,6 +204,35 @@ final class ShareViewController: UIViewController {
             responder = current.next
         }
         completion(false)
+    }
+}
+
+/// Thread-safe accumulator for item-provider callbacks.
+private final class ShareCollector {
+    private let lock = NSLock()
+    private var urls: [URL] = []
+    private var texts: [String] = []
+    private var delivered = false
+
+    func add(url: URL) {
+        lock.lock(); urls.append(url); lock.unlock()
+    }
+
+    func add(text: String?) {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        lock.lock(); texts.append(text); lock.unlock()
+    }
+
+    func claimDelivery() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if delivered { return false }
+        delivered = true
+        return true
+    }
+
+    func snapshot() -> ([URL], [String]) {
+        lock.lock(); defer { lock.unlock() }
+        return (urls, texts)
     }
 }
 

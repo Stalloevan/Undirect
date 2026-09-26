@@ -262,7 +262,23 @@ final class FaviconStore {
         }
     }
 
+    private static let monogramCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 200
+        return cache
+    }()
+
+    /// Cached: the sidebar asks for every tab's icon on each refresh, and
+    /// re-rendering these per call was a measurable chunk of scroll/load jank.
     static func monogram(for host: String?, tor: Bool) -> UIImage {
+        let key = "\(tor ? 1 : 0)|\(host.map(DomainUtil.normalize) ?? "")|\(Theme.tor.hashValue)" as NSString
+        if let cached = monogramCache.object(forKey: key) { return cached }
+        let image = renderMonogram(for: host, tor: tor)
+        monogramCache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static func renderMonogram(for host: String?, tor: Bool) -> UIImage {
         let size = CGSize(width: 64, height: 64)
         let letter = host.map { String(DomainUtil.normalize($0).prefix(1)).uppercased() } ?? "+"
         let seed = (host ?? "").unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) % 3600 }

@@ -67,22 +67,55 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     private func handle(_ contexts: Set<UIOpenURLContext>) {
-        guard let incoming = contexts.first?.url, incoming.scheme?.lowercased() == "undirect",
-              let items = URLComponents(url: incoming, resolvingAgainstBaseURL: false)?.queryItems else { return }
-        let target: URL?
+        for context in contexts {
+            guard let target = Self.target(from: context.url) else {
+                AppLog.shared.log("Ignored incoming link: \(context.url.absoluteString.prefix(120))", category: "app")
+                continue
+            }
+            AppLog.shared.log("Opened shared link: \(target.host ?? target.absoluteString)", category: "app")
+            // Queued by the browser until its saved tabs are restored, so a
+            // cold launch from the share sheet can't lose or bury the link.
+            browser?.openExternal(target)
+        }
+    }
+
+    /// undirect://open?url=… / ?text=… (share sheet, Shortcuts), plus plain
+    /// http(s) links handed straight to the app.
+    static func target(from incoming: URL) -> URL? {
+        let scheme = incoming.scheme?.lowercased()
+        if scheme == "http" || scheme == "https" { return incoming }
+        guard scheme == "undirect",
+              let items = URLComponents(url: incoming, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
         if let link = items.first(where: { $0.name == "url" })?.value {
-            target = browser?.url(from: link)
-        } else if let text = items.first(where: { $0.name == "text" })?.value {
+            return webURL(from: link)
+        }
+        if let text = items.first(where: { $0.name == "text" })?.value {
             // Shared text often wraps a link ("look at this: https://…").
             let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-            let embedded = detector?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))?.url
-            target = embedded ?? browser?.url(from: text)
-        } else {
-            target = nil
+            let embedded = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                .compactMap(\.url)
+                .first { ["http", "https"].contains($0.scheme?.lowercased() ?? "") }
+            return embedded ?? webURL(from: text)
         }
-        guard let target else { return }
-        AppLog.shared.log("Opened shared link: \(target.host ?? target.absoluteString)", category: "app")
-        browser?.openTab(url: target)
+        return nil
+    }
+
+    private static func webURL(from raw: String) -> URL? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if let url = URL(string: text), let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https", url.host != nil {
+            return url
+        }
+        // Tolerate unencoded characters some apps leave in shared links.
+        if let encoded = text.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed.union(.urlQueryAllowed)),
+           let url = URL(string: encoded), url.host != nil, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            return url
+        }
+        if !text.contains(" "), text.contains("."), let url = URL(string: "https://" + text), url.host != nil {
+            return url
+        }
+        return Settings.shared.searchURL(for: text)
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

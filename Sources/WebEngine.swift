@@ -13,6 +13,14 @@ enum WebEngine {
         return config
     }
 
+    /// The settings that change what installScripts injects. Tabs only need
+    /// their scripts reinstalled when this changes.
+    static func scriptSettingsSignature() -> String {
+        let s = Settings.shared
+        let flags = [s.autoHandleCookieBanners, s.blockWebRTC, s.sendGPC, s.fingerprintProtection]
+        return flags.map { $0 ? "1" : "0" }.joined() + "|" + s.appTheme.rawValue
+    }
+
     /// Installs every Undirect script on a (non-popup) tab's content controller.
     /// Our scripts run in an isolated content world so pages can't see or tamper with them.
     static func installScripts(on controller: WKUserContentController, messageName: String, tor: Bool) {

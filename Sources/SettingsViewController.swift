@@ -173,6 +173,7 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Tab bar side", kind: .choice(value: { s.sidebarPosition.title }, options: {
                     SidebarPosition.allCases.map { pos -> (String, () -> Void) in (pos.title, { s.sidebarPosition = pos }) }
                 })),
+                SettingsRow(title: "Downloads", kind: .push({ DownloadSettingsViewController() })),
                 SettingsRow(title: "New tab page layout", kind: .push({ NTPLayoutViewController() })),
                 SettingsRow(title: "Favorites", kind: .push({ [weak self] in
                     let vc = FavoritesViewController()

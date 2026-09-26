@@ -49,7 +49,13 @@ final class Tab: NSObject {
     // navigating). Capped and evicted oldest-first; kept in memory only.
     private var historySnapshots: [String: UIImage] = [:]
     private var historySnapshotOrder: [String] = []
-    private let maxHistorySnapshots = 20
+    // Downscaled and capped: full-resolution snapshots are ~10 MB each on
+    // a 3x screen, which added up to hundreds of MB across a few tabs.
+    private let maxHistorySnapshots = 8
+
+    /// A Tor load that failed because Tor's connection had dropped; retried
+    /// automatically as soon as TorManager reports it's working again.
+    private var torRetryURL: URL?
 
     private let messageName: String
     private let messageProxy: ScriptMessageProxy
@@ -123,6 +129,19 @@ final class Tab: NSObject {
             webView.observe(\.canGoForward) { wv, _ in notify(wv) },
             webView.observe(\.isLoading) { wv, _ in notify(wv) }
         ]
+        if isTor {
+            NotificationCenter.default.addObserver(self, selector: #selector(torDidRefresh),
+                                                   name: TorManager.didRefresh, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(torDidRefresh),
+                                                   name: TorManager.stateDidChange, object: nil)
+        }
+    }
+
+    @objc private func torDidRefresh() {
+        guard TorManager.shared.isReady, let url = torRetryURL else { return }
+        torRetryURL = nil
+        AppLog.shared.log("Retrying \(url.host ?? "page") now that Tor is back", category: "tor")
+        load(url)
     }
 
     deinit {
@@ -157,7 +176,7 @@ final class Tab: NSObject {
         expectedURL = url
         if isTor && !TorManager.shared.isReady {
             pendingURL = url
-            TorManager.shared.start()
+            TorManager.shared.ensureRunning()
             delegate?.tabDidChange(self)
             return
         }
@@ -319,9 +338,12 @@ extension Tab: WKNavigationDelegate {
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.allow); return }
         let scheme = url.scheme?.lowercased() ?? ""
+        // `<a download>` links (and page-generated blob:/data: files) become
+        // downloads instead of navigations.
+        let proceed: WKNavigationActionPolicy = action.shouldPerformDownload ? .download : .allow
 
         if scheme.isEmpty || ["about", "data", "blob", "javascript"].contains(scheme) {
-            decisionHandler(.allow)
+            decisionHandler(proceed)
             return
         }
         if scheme != "http" && scheme != "https" {
@@ -334,7 +356,7 @@ extension Tab: WKNavigationDelegate {
         }
 
         let isMainFrame = action.targetFrame?.isMainFrame ?? true
-        guard isMainFrame else { decisionHandler(.allow); return }
+        guard isMainFrame else { decisionHandler(proceed); return }
 
         // Standalone PWA: a main-frame navigation out of the app's scope is
         // handed to the normal browser instead of loading in the app window.
@@ -358,7 +380,7 @@ extension Tab: WKNavigationDelegate {
 
         if type == .backForward || type == .reload {
             applyContentRules(for: destHost)
-            decisionHandler(.allow)
+            decisionHandler(proceed)
             return
         }
 
@@ -378,7 +400,7 @@ extension Tab: WKNavigationDelegate {
             expectedURL = nil
             userChainActive = true
             applyContentRules(for: destHost)
-            decisionHandler(.allow)
+            decisionHandler(proceed)
             return
         }
 
@@ -404,13 +426,28 @@ extension Tab: WKNavigationDelegate {
         if allowed {
             if userInitiated { userChainActive = true }
             applyContentRules(for: destHost)
-            decisionHandler(.allow)
+            decisionHandler(proceed)
             return
         }
 
         // A page-driven jump to another site after it loaded: block it.
         decisionHandler(.cancel)
         block(.redirects, host: destHost)
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(DownloadManager.shouldDownload(navigationResponse) ? .download : .allow)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        userChainActive = false
+        DownloadManager.shared.track(download, isTor: isTor)
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        userChainActive = false
+        DownloadManager.shared.track(download, isTor: isTor)
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
@@ -438,6 +475,12 @@ extension Tab: WKNavigationDelegate {
         // -999 is just "cancelled" — routine whenever a load is superseded
         // (including our own tracker-stripping reload), not a real failure.
         if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
+        // WebKit 102 = "frame load interrupted": the expected result of our own
+        // policy decisions (a blocked redirect, or a response turned into a
+        // download). 204 = handed to a plug-in. Neither is a real failure —
+        // reporting them used to stack a bogus "Couldn't load" on top of the
+        // "Blocked redirect" toast.
+        if nsError.domain == "WebKitErrorDomain" && (nsError.code == 102 || nsError.code == 204) { return }
         let failing = (nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
             ?? webView.url?.absoluteString ?? lastKnownURL?.absoluteString ?? "?"
         AppLog.shared.log("\(stage) failed (\(isTor ? "Tor" : "normal") tab) for \(failing): \(nsError.localizedDescription) [\(nsError.domain) \(nsError.code)]", category: "nav")
@@ -450,15 +493,15 @@ extension Tab: WKNavigationDelegate {
             return
         }
         if isTor {
-            // Tor's own socket connections don't survive the app being
-            // backgrounded (iOS suspends them), so circuits already open when
-            // you left often can't be reused on return — this is what that
-            // looks like. A fresh identity forces new circuits.
-            delegate?.tab(self, toast: "Tor connection dropped (common after backgrounding) — reconnecting…")
-            TorManager.shared.reconnectAfterForeground { [weak self] ok in
-                guard let self else { return }
-                self.delegate?.tab(self, toast: ok ? "Tor reconnected — try again" : "Couldn't reconnect Tor — try again, or restart the app")
+            // Tor's connection dropped under us (sleep, network change). Ask
+            // TorManager to repair it and retry this exact page automatically
+            // once it's back — no manual reload, no app restart.
+            if let failingURL = (nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL)
+                ?? URL(string: failing), failingURL.scheme?.hasPrefix("http") == true {
+                torRetryURL = failingURL
             }
+            delegate?.tab(self, toast: "Tor connection dropped — reconnecting, the page will reload by itself")
+            TorManager.shared.refresh(reason: "Tor tab connection error", forceCycle: false)
         } else {
             delegate?.tab(self, toast: "Couldn't connect — check your connection")
         }
@@ -594,10 +637,21 @@ extension Tab: WKNavigationDelegate {
         historySnapshots[url.absoluteString]
     }
 
+    /// Frees memory this tab can rebuild on demand (used on memory warnings).
+    func dropCaches() {
+        historySnapshots.removeAll()
+        historySnapshotOrder.removeAll()
+    }
+
     private func captureHistorySnapshot() {
         guard let url = webView.url else { return }
         let key = url.absoluteString
-        webView.takeSnapshot(with: nil) { [weak self] image, _ in
+        let config = WKSnapshotConfiguration()
+        // Half-width is plenty for a finger-tracking transition preview and
+        // costs a quarter of the memory.
+        config.snapshotWidth = NSNumber(value: Double(max(webView.bounds.width / 2, 1)))
+        config.afterScreenUpdates = false
+        webView.takeSnapshot(with: config) { [weak self] image, _ in
             guard let self, let image else { return }
             if self.historySnapshots[key] == nil { self.historySnapshotOrder.append(key) }
             self.historySnapshots[key] = image
@@ -767,28 +821,38 @@ extension Tab: WKUIDelegate {
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        guard let presenter = delegate?.presenter(for: self) else { completionHandler(); return }
         let alert = UIAlertController(title: frame.request.url?.host, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
-        presenter.present(alert, animated: true)
+        if !presentDialog(alert) { completionHandler() }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        guard let presenter = delegate?.presenter(for: self) else { completionHandler(false); return }
         let alert = UIAlertController(title: frame.request.url?.host, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
         alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
-        presenter.present(alert, animated: true)
+        if !presentDialog(alert) { completionHandler(false) }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-        guard let presenter = delegate?.presenter(for: self) else { completionHandler(nil); return }
         let alert = UIAlertController(title: frame.request.url?.host, message: prompt, preferredStyle: .alert)
         alert.addTextField { $0.text = defaultText }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(alert.textFields?.first?.text) })
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in completionHandler(alert?.textFields?.first?.text) })
+        if !presentDialog(alert) { completionHandler(nil) }
+    }
+
+    /// Presents a page's alert/confirm/prompt from the top-most controller.
+    /// Returns false when it can't be shown (background tab, something else
+    /// mid-presentation) so the caller answers WebKit immediately — WebKit
+    /// throws if a dialog's completion handler is never called.
+    private func presentDialog(_ alert: UIAlertController) -> Bool {
+        guard var presenter = delegate?.presenter(for: self) else { return false }
+        while let presented = presenter.presentedViewController, !presented.isBeingDismissed { presenter = presented }
+        guard !presenter.isBeingDismissed, presenter.viewIfLoaded?.window != nil,
+              !(presenter is UIAlertController) else { return false }
         presenter.present(alert, animated: true)
+        return true
     }
 }
