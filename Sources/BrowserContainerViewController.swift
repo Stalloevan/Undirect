@@ -99,6 +99,12 @@ final class BrowserContainerViewController: UIViewController {
         nc.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
 
         setupPageInteractionAutoHide()
+        NotificationCenter.default.addObserver(self, selector: #selector(handleImmersiveRequest(_:)),
+                                               name: ImmersiveRequest.notification, object: nil)
+        if let pending = ImmersiveRequest.pendingURL {
+            ImmersiveRequest.pendingURL = nil
+            DispatchQueue.main.async { [weak self] in self?.presentImmersive(url: pending) }
+        }
         restoreSession()
     }
 
@@ -353,6 +359,23 @@ final class BrowserContainerViewController: UIViewController {
 
     /// The page-content area (tap or start of a scroll) collapses the sidebar
     /// back to hidden, whichever of the two visible states it was in.
+    @objc private func handleImmersiveRequest(_ note: Notification) {
+        guard let url = note.object as? URL else { return }
+        presentImmersive(url: url)
+    }
+
+    /// Opens `url` as a normal tab (so it's right there with full chrome once
+    /// the person exits) and immediately covers it with the chromeless viewer.
+    private func presentImmersive(url: URL) {
+        if presentedViewController != nil { dismiss(animated: false) }
+        let tab = openTab(url: url, select: true)
+        let vc = ImmersiveViewController(tab: tab)
+        vc.onExit = { [weak self] in
+            self?.dismiss(animated: false) { self?.showCurrentTab() }
+        }
+        present(vc, animated: false)
+    }
+
     private func setupPageInteractionAutoHide() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handlePageTap))
         tap.cancelsTouchesInView = false
