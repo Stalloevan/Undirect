@@ -29,16 +29,15 @@ enum WebEngine {
         if Settings.shared.autoHandleCookieBanners {
             add(consentAutoHandlerScript, mainFrameOnly: false, world: world)
         }
-        // WebRTC can reveal your real IP over UDP (STUN), bypassing any
-        // proxy — always blocked in Tor tabs, and by default everywhere.
-        if tor || Settings.shared.blockWebRTC {
-            add(disableWebRTCScript, mainFrameOnly: false, world: .page)
-        }
-        if Settings.shared.sendGPC {
-            add(privacySignalScript, mainFrameOnly: false, world: .page)
-        }
-        if Settings.shared.fingerprintProtection || tor {
-            add(fingerprintProtectionScript(tor: tor), mainFrameOnly: false, world: .page)
+        // One page-world shield covering WebRTC, privacy signals and
+        // fingerprinting, applied to every frame *and* to any same-origin
+        // iframe a script creates (fingerprinters use fresh iframes to read
+        // unpatched APIs).
+        let webrtc = tor || Settings.shared.blockWebRTC
+        let gpc = Settings.shared.sendGPC
+        let fp = tor || Settings.shared.fingerprintProtection
+        if webrtc || gpc || fp {
+            add(shieldScript(webrtc: webrtc, gpc: gpc, fingerprint: fp, tor: tor), mainFrameOnly: false, world: .page)
         }
     }
 
@@ -48,21 +47,19 @@ enum WebEngine {
     /// resulting fingerprint can't link visits together.
     private static let fingerprintSeed = UInt32.random(in: 1...UInt32.max)
 
-    /// Global Privacy Control + Do Not Track, as JS signals. (The matching
-    /// Sec-GPC/DNT request headers are added to top-level loads in Tab.)
-    private static let privacySignalScript = """
-    (function () {
-      function def(o, k, v) { try { Object.defineProperty(o, k, { get: function () { return v; }, configurable: true }); } catch (e) {} }
-      def(Navigator.prototype, 'globalPrivacyControl', true);
-      def(Navigator.prototype, 'doNotTrack', '1');
-    })();
-    """
-
-    private static func fingerprintProtectionScript(tor: Bool) -> String {
+    /// Privacy shield. Where a test page scores "exposed" for any value it
+    /// can read, the most effective defense is making APIs genuinely absent
+    /// (reported as unavailable) rather than returning fake-but-plausible
+    /// values, which still count — so hardware/media APIs are removed, while
+    /// canvas/WebGL/audio (which can't be removed without breaking pages) get
+    /// per-site, per-launch noise that makes the fingerprint unlinkable.
+    private static func shieldScript(webrtc: Bool, gpc: Bool, fingerprint: Bool, tor: Bool) -> String {
         """
         (function () {
-          if (window.__undirectFP) return;
-          window.__undirectFP = true;
+          var CFG = { webrtc: \(webrtc), gpc: \(gpc), fp: \(fingerprint), tor: \(tor) };
+          if (window.__undirectShield) return;
+          window.__undirectShield = true;
+          var done = new WeakSet();
           var host = location.hostname || '';
           var seed = \(fingerprintSeed) >>> 0;
           for (var i = 0; i < host.length; i++) { seed ^= host.charCodeAt(i); seed = Math.imul(seed, 16777619) >>> 0; }
@@ -72,105 +69,169 @@ enum WebEngine {
             return x >>> 0;
           }
           function def(o, k, v) { try { Object.defineProperty(o, k, { get: function () { return v; }, configurable: true }); } catch (e) {} }
+          function drop(o, k) {
+            if (!o) return;
+            try { delete o[k]; } catch (e) {}
+            try { if (k in o) Object.defineProperty(o, k, { value: undefined, configurable: true, writable: true }); } catch (e) {}
+          }
 
-          // --- Canvas: tiny deterministic per-site noise on read-back.
-          function noisify(img) {
-            var d = img.data;
-            if (d.length > 16000000) return img;
-            for (var i = 0; i < d.length; i += 4) {
-              var v = mix(i);
-              if ((v & 15) === 0) { var c = i + ((v >>> 4) % 3); d[c] = d[c] ^ 1; }
+          function protect(w) {
+            if (!w || done.has(w)) return;
+            try { if (!w.Navigator) return; } catch (e) { return; }
+            done.add(w);
+            var N = w.Navigator.prototype;
+
+            if (CFG.webrtc) {
+              ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription',
+               'RTCIceCandidate', 'RTCRtpSender', 'RTCRtpReceiver'].forEach(function (k) { drop(w, k); });
+              drop(N, 'mediaDevices');
             }
-            return img;
-          }
-          var C2D = window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype;
-          if (C2D) {
-            var getImageData = C2D.getImageData;
-            C2D.getImageData = function () { return noisify(getImageData.apply(this, arguments)); };
-            var copy = function (canvas) {
-              try {
-                var w = canvas.width, h = canvas.height;
-                if (!w || !h || w * h > 4000000) return null;
-                var c = document.createElement('canvas'); c.width = w; c.height = h;
-                var ctx = c.getContext('2d');
-                ctx.drawImage(canvas, 0, 0);
-                ctx.putImageData(noisify(getImageData.call(ctx, 0, 0, w, h)), 0, 0);
-                return c;
-              } catch (e) { return null; }
-            };
-            var HC = HTMLCanvasElement.prototype;
-            var toDataURL = HC.toDataURL, toBlob = HC.toBlob;
-            HC.toDataURL = function () { var c = copy(this); return toDataURL.apply(c || this, arguments); };
-            HC.toBlob = function () { var c = copy(this); return toBlob.apply(c || this, arguments); };
+            if (CFG.gpc) {
+              def(N, 'globalPrivacyControl', true);
+              def(N, 'doNotTrack', '1');
+            }
+            if (CFG.fp) fingerprint(w, N);
+            if (CFG.tor) torUniform(w, N);
+            hookFrames(w);
           }
 
-          // --- WebGL: generic GPU strings + read-back noise.
-          function patchGL(P) {
-            if (!P) return;
-            var gp = P.getParameter;
-            P.getParameter = function (p) {
-              if (p === 37445) return 'Apple Inc.';
-              if (p === 37446) return 'Apple GPU';
-              return gp.apply(this, arguments);
-            };
-            var rp = P.readPixels;
-            P.readPixels = function () {
-              var r = rp.apply(this, arguments);
-              var px = arguments[6];
-              if (px && px.length) { for (var i = 0; i < px.length; i += 4) { if ((mix(i) & 15) === 0) px[i] = px[i] ^ 1; } }
-              return r;
-            };
-          }
-          patchGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
-          patchGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+          function fingerprint(w, N) {
+            // Hardware hints: absent rather than faked.
+            ['hardwareConcurrency', 'deviceMemory', 'maxTouchPoints', 'getGamepads', 'getBattery',
+             'connection', 'bluetooth', 'usb', 'hid', 'serial', 'xr'].forEach(function (k) { drop(N, k); });
+            drop(N, 'mediaDevices');
 
-          // --- Audio: inaudible (~-140 dB) noise on analysis read-back.
-          if (window.AudioBuffer) {
-            var gcd = AudioBuffer.prototype.getChannelData, seen = new WeakSet();
-            AudioBuffer.prototype.getChannelData = function () {
-              var data = gcd.apply(this, arguments);
-              if (!seen.has(data)) {
-                seen.add(data);
-                for (var i = 0; i < data.length; i += 97) data[i] += ((mix(i) & 255) - 128) * 1e-9;
+            // Canvas: tiny deterministic per-site noise on read-back.
+            function noisify(img) {
+              var d = img.data;
+              if (d.length > 16000000) return img;
+              for (var i = 0; i < d.length; i += 4) {
+                var v = mix(i);
+                if ((v & 15) === 0) { var c = i + ((v >>> 4) % 3); d[c] = d[c] ^ 1; }
               }
-              return data;
-            };
-          }
-          if (window.AnalyserNode) {
-            var gffd = AnalyserNode.prototype.getFloatFrequencyData;
-            AnalyserNode.prototype.getFloatFrequencyData = function (arr) {
-              gffd.apply(this, arguments);
-              for (var i = 0; i < arr.length; i++) arr[i] += ((mix(i) & 255) - 128) * 1e-6;
-            };
+              return img;
+            }
+            var C2D = w.CanvasRenderingContext2D && w.CanvasRenderingContext2D.prototype;
+            if (C2D) {
+              var getImageData = C2D.getImageData;
+              C2D.getImageData = function () { return noisify(getImageData.apply(this, arguments)); };
+              var copy = function (canvas) {
+                try {
+                  var cw = canvas.width, ch = canvas.height;
+                  if (!cw || !ch || cw * ch > 4000000) return null;
+                  var c = w.document.createElement('canvas'); c.width = cw; c.height = ch;
+                  var ctx = c.getContext('2d');
+                  ctx.drawImage(canvas, 0, 0);
+                  ctx.putImageData(noisify(getImageData.call(ctx, 0, 0, cw, ch)), 0, 0);
+                  return c;
+                } catch (e) { return null; }
+              };
+              var HC = w.HTMLCanvasElement.prototype;
+              var toDataURL = HC.toDataURL, toBlob = HC.toBlob;
+              HC.toDataURL = function () { var c = copy(this); return toDataURL.apply(c || this, arguments); };
+              HC.toBlob = function () { var c = copy(this); return toBlob.apply(c || this, arguments); };
+            }
+
+            // WebGL: hide the GPU-identifying extension entirely, noise read-back.
+            function patchGL(P) {
+              if (!P) return;
+              var ge = P.getExtension, gse = P.getSupportedExtensions, gp = P.getParameter, rp = P.readPixels;
+              P.getExtension = function (name) {
+                if (String(name).toLowerCase() === 'webgl_debug_renderer_info') return null;
+                return ge.apply(this, arguments);
+              };
+              P.getSupportedExtensions = function () {
+                var list = gse.apply(this, arguments) || [];
+                return list.filter(function (n) { return String(n).toLowerCase() !== 'webgl_debug_renderer_info'; });
+              };
+              P.getParameter = function (p) {
+                if (p === 37445 || p === 37446) return null;
+                return gp.apply(this, arguments);
+              };
+              P.readPixels = function () {
+                var r = rp.apply(this, arguments);
+                var px = arguments[6];
+                if (px && px.length) { for (var i = 0; i < px.length; i += 4) { if ((mix(i) & 15) === 0) px[i] = px[i] ^ 1; } }
+                return r;
+              };
+            }
+            patchGL(w.WebGLRenderingContext && w.WebGLRenderingContext.prototype);
+            patchGL(w.WebGL2RenderingContext && w.WebGL2RenderingContext.prototype);
+
+            // Audio: inaudible (~-140 dB) noise on analysis read-back.
+            if (w.AudioBuffer) {
+              var gcd = w.AudioBuffer.prototype.getChannelData, seen = new WeakSet();
+              w.AudioBuffer.prototype.getChannelData = function () {
+                var data = gcd.apply(this, arguments);
+                if (!seen.has(data)) {
+                  seen.add(data);
+                  for (var i = 0; i < data.length; i += 97) data[i] += ((mix(i) & 255) - 128) * 1e-9;
+                }
+                return data;
+              };
+            }
+            if (w.AnalyserNode) {
+              var gffd = w.AnalyserNode.prototype.getFloatFrequencyData;
+              w.AnalyserNode.prototype.getFloatFrequencyData = function (arr) {
+                gffd.apply(this, arguments);
+                for (var i = 0; i < arr.length; i++) arr[i] += ((mix(i) & 255) - 128) * 1e-6;
+              };
+            }
+
+            // Fonts: document.fonts.check only confirms fonts the page itself
+            // loaded as web fonts, so it can't be used to probe installed ones.
+            var FFS = w.FontFaceSet && w.FontFaceSet.prototype;
+            if (FFS && FFS.check) {
+              var chk = FFS.check;
+              FFS.check = function (font) {
+                try {
+                  var s = String(font).toLowerCase(), web = [];
+                  this.forEach(function (f) { web.push(String(f.family).split('"').join('').split("'").join('').toLowerCase()); });
+                  for (var i = 0; i < web.length; i++) { if (web[i] && s.indexOf(web[i]) !== -1) return chk.apply(this, arguments); }
+                  return false;
+                } catch (e) { return chk.apply(this, arguments); }
+              };
+            }
+
+            // Where you came from: hide cross-site referrers from scripts.
+            try {
+              var ref = w.document.referrer;
+              if (ref && new URL(ref).hostname !== w.location.hostname) def(w.Document.prototype, 'referrer', '');
+            } catch (e) {}
           }
 
-          // --- Hardware hints: report common values instead of the real ones.
-          def(Navigator.prototype, 'hardwareConcurrency', 4);
-          if ('deviceMemory' in navigator) def(Navigator.prototype, 'deviceMemory', 4);
-          if (navigator.getBattery) navigator.getBattery = undefined;
-          if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-            navigator.mediaDevices.enumerateDevices = function () { return Promise.resolve([]); };
+          // Tor tabs look like every other Tor user: UTC and en-US.
+          function torUniform(w, N) {
+            def(N, 'language', 'en-US');
+            def(N, 'languages', ['en-US', 'en']);
+            w.Date.prototype.getTimezoneOffset = function () { return 0; };
+            var ro = w.Intl.DateTimeFormat.prototype.resolvedOptions;
+            w.Intl.DateTimeFormat.prototype.resolvedOptions = function () { var r = ro.apply(this, arguments); r.timeZone = 'UTC'; return r; };
           }
 
-          // --- Where you came from: hide cross-site referrers from scripts.
-          try {
-            var ref = document.referrer;
-            if (ref && new URL(ref).hostname !== location.hostname) def(Document.prototype, 'referrer', '');
-          } catch (e) {}
+          // Same-origin iframes created by script get the same protection the
+          // moment anyone touches them.
+          function hookFrames(w) {
+            try {
+              var IF = w.HTMLIFrameElement && w.HTMLIFrameElement.prototype;
+              if (!IF) return;
+              var cw = Object.getOwnPropertyDescriptor(IF, 'contentWindow');
+              var cd = Object.getOwnPropertyDescriptor(IF, 'contentDocument');
+              if (cw && cw.get) Object.defineProperty(IF, 'contentWindow', {
+                configurable: true, enumerable: cw.enumerable,
+                get: function () { var v = cw.get.call(this); try { protect(v); } catch (e) {} return v; }
+              });
+              if (cd && cd.get) Object.defineProperty(IF, 'contentDocument', {
+                configurable: true, enumerable: cd.enumerable,
+                get: function () { var v = cd.get.call(this); try { if (v) protect(v.defaultView); } catch (e) {} return v; }
+              });
+            } catch (e) {}
+          }
 
-          \(tor ? torUniformityJS : "")
+          protect(window);
         })();
         """
     }
-
-    /// Tor tabs additionally look like every other Tor user: UTC and en-US.
-    private static let torUniformityJS = """
-          def(Navigator.prototype, 'language', 'en-US');
-          def(Navigator.prototype, 'languages', ['en-US', 'en']);
-          Date.prototype.getTimezoneOffset = function () { return 0; };
-          var ro = Intl.DateTimeFormat.prototype.resolvedOptions;
-          Intl.DateTimeFormat.prototype.resolvedOptions = function () { var r = ro.apply(this, arguments); r.timeZone = 'UTC'; return r; };
-    """
 
     // MARK: Scripts
 
@@ -335,14 +396,6 @@ enum WebEngine {
     })();
     """
 
-    private static let disableWebRTCScript = """
-    (function () {
-      ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel'].forEach(function (k) {
-        try { Object.defineProperty(window, k, { value: undefined, writable: false, configurable: false }); } catch (e) {}
-      });
-      try { Object.defineProperty(navigator, 'mediaDevices', { value: undefined, configurable: false }); } catch (e) {}
-    })();
-    """
 
     /// Reports real taps, password submissions and blocked resource loads, and
     /// implements the click-through used to get past redirect/ad overlays.
