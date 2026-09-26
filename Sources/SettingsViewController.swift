@@ -158,6 +158,13 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Status", kind: .info({ TorManager.shared.state.description }))
             ]),
             SettingsSection(title: "General", footer: nil, rows: [
+                SettingsRow(title: "Search engine", kind: .choice(value: { s.searchEngine.title }, options: {
+                    SearchEngine.allCases.map { engine -> (String, () -> Void) in
+                        (engine.title, { [weak self] in
+                            if engine == .custom { self?.promptCustomSearch() } else { s.searchEngine = engine }
+                        })
+                    }
+                })),
                 SettingsRow(title: "Theme", kind: .choice(value: { s.appTheme.title }, options: {
                     AppTheme.allCases.map { theme -> (String, () -> Void) in (theme.title, { s.appTheme = theme }) }
                 })),
@@ -181,6 +188,31 @@ final class SettingsViewController: SettingsTableViewController {
             ])
         ]
         super.rebuild()
+    }
+
+    private func promptCustomSearch() {
+        let alert = UIAlertController(title: "Custom search engine",
+                                      message: "Enter the search URL with %s where the search terms go, e.g. https://search.example.com/?q=%s",
+                                      preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = Settings.shared.customSearchTemplate
+            field.placeholder = "https://…?q=%s"
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
+            let text = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard text.contains("%s"), URL(string: text.replacingOccurrences(of: "%s", with: "x"))?.host != nil else {
+                self?.toast("That needs to be a full URL containing %s")
+                return
+            }
+            Settings.shared.customSearchTemplate = text
+            Settings.shared.searchEngine = .custom
+            self?.rebuild()
+        })
+        present(alert, animated: true)
     }
 
     private func exportLogs() {

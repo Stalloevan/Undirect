@@ -19,6 +19,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
 
         if Settings.shared.torForNewTabs { TorManager.shared.start() }
+        handle(connectionOptions.urlContexts)
         FavoritePreloader.shared.start()
     }
 
@@ -54,6 +55,31 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         UIView.transition(with: window, duration: 0.25, options: .transitionCrossDissolve) {
             self.buildRootViewController(in: window)
         }
+    }
+
+    /// Links shared to Undirect (share sheet, Shortcuts, other apps) arrive
+    /// as undirect://open?url=… or undirect://open?text=…
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        handle(URLContexts)
+    }
+
+    private func handle(_ contexts: Set<UIOpenURLContext>) {
+        guard let incoming = contexts.first?.url, incoming.scheme?.lowercased() == "undirect",
+              let items = URLComponents(url: incoming, resolvingAgainstBaseURL: false)?.queryItems else { return }
+        let target: URL?
+        if let link = items.first(where: { $0.name == "url" })?.value {
+            target = browser?.url(from: link)
+        } else if let text = items.first(where: { $0.name == "text" })?.value {
+            // Shared text often wraps a link ("look at this: https://…").
+            let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+            let embedded = detector?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))?.url
+            target = embedded ?? browser?.url(from: text)
+        } else {
+            target = nil
+        }
+        guard let target else { return }
+        AppLog.shared.log("Opened shared link: \(target.host ?? target.absoluteString)", category: "app")
+        browser?.openTab(url: target)
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

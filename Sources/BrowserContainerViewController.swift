@@ -616,15 +616,13 @@ final class BrowserContainerViewController: UIViewController {
         updateChrome()
     }
 
-    private func url(from input: String) -> URL? {
+    func url(from input: String) -> URL? {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if text.contains("://"), let url = URL(string: text), url.host != nil { return url }
         let looksLikeHost = !text.contains(" ") && (text.contains(".") || text.hasPrefix("localhost"))
         if looksLikeHost, let url = URL(string: "https://" + text), url.host != nil { return url }
-        var comps = URLComponents(string: "https://duckduckgo.com/")!
-        comps.queryItems = [URLQueryItem(name: "q", value: text)]
-        return comps.url
+        return Settings.shared.searchURL(for: text)
     }
 
     func persist() {

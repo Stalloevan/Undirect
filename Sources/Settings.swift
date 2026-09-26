@@ -200,6 +200,37 @@ enum CookieCleanupMode: String, CaseIterable {
     }
 }
 
+enum SearchEngine: String, CaseIterable {
+    case duckDuckGo, startpage, brave, mojeek, ecosia, google, bing, custom
+
+    var title: String {
+        switch self {
+        case .duckDuckGo: return "DuckDuckGo"
+        case .startpage: return "Startpage"
+        case .brave: return "Brave Search"
+        case .mojeek: return "Mojeek"
+        case .ecosia: return "Ecosia"
+        case .google: return "Google"
+        case .bing: return "Bing"
+        case .custom: return "Custom"
+        }
+    }
+
+    /// Query URL template; `%s` is replaced with the URL-encoded search terms.
+    var template: String? {
+        switch self {
+        case .duckDuckGo: return "https://duckduckgo.com/?q=%s"
+        case .startpage: return "https://www.startpage.com/do/search?q=%s"
+        case .brave: return "https://search.brave.com/search?q=%s"
+        case .mojeek: return "https://www.mojeek.com/search?q=%s"
+        case .ecosia: return "https://www.ecosia.org/search?q=%s"
+        case .google: return "https://www.google.com/search?q=%s"
+        case .bing: return "https://www.bing.com/search?q=%s"
+        case .custom: return nil
+        }
+    }
+}
+
 enum SidebarState: String, CaseIterable {
     case hidden, minimal, full
 }
@@ -265,6 +296,27 @@ final class Settings {
         get { CookieCleanupMode(rawValue: defaults.string(forKey: "s.cleanup") ?? "") ?? .onTabClose }
         set { set(newValue.rawValue, "s.cleanup") }
     }
+    var searchEngine: SearchEngine {
+        get { SearchEngine(rawValue: defaults.string(forKey: "s.searchEngine") ?? "") ?? .duckDuckGo }
+        set { set(newValue.rawValue, "s.searchEngine") }
+    }
+    /// e.g. "https://search.example.com/?q=%s"
+    var customSearchTemplate: String {
+        get { defaults.string(forKey: "s.customSearch") ?? "" }
+        set { set(newValue, "s.customSearch") }
+    }
+
+    /// Builds the search URL for `query` with the chosen engine, falling back
+    /// to DuckDuckGo if a custom template is missing or malformed.
+    func searchURL(for query: String) -> URL? {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#"))) ?? query
+        var template = searchEngine.template ?? customSearchTemplate
+        if !template.contains("%s") || URL(string: template.replacingOccurrences(of: "%s", with: "x"))?.host == nil {
+            template = SearchEngine.duckDuckGo.template!
+        }
+        return URL(string: template.replacingOccurrences(of: "%s", with: encoded))
+    }
+
     var fingerprintProtection: Bool {
         get { bool("s.fpProtect", true) }
         set { set(newValue, "s.fpProtect") }
