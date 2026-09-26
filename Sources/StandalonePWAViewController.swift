@@ -133,20 +133,20 @@ extension StandalonePWAViewController: TabDelegate {
     func tabDidChange(_ pwaTab: Tab) {
         if let title = pwaTab.webView.title, !title.isEmpty { /* keep app name, not page title */ }
     }
-    func pwaTab(_ pwaTab: Tab, toast message: String) {}
-    func pwaTab(_ pwaTab: Tab, openInNewTab url: URL) { escapeScope(url) }
-    func pwaTab(_ pwaTab: Tab, openInBackgroundTab url: URL) { escapeScope(url) }
-    func pwaTab(_ pwaTab: Tab, share url: URL) {
+    func tab(_ pwaTab: Tab, toast message: String) {}
+    func tab(_ pwaTab: Tab, openInNewTab url: URL) { escapeScope(url) }
+    func tab(_ pwaTab: Tab, openInBackgroundTab url: URL) { escapeScope(url) }
+    func tab(_ pwaTab: Tab, share url: URL) {
         present(UIActivityViewController(activityItems: [url], applicationActivities: nil), animated: true)
     }
-    func pwaTab(_ pwaTab: Tab, openInTorTab url: URL) { escapeScope(url) }
-    func pwaTab(_ pwaTab: Tab, blockedPopupTo url: URL) {}
-    func pwaTab(_ pwaTab: Tab, foundInstallableManifest manifest: WebAppManifest) {}
-    func pwaTab(_ pwaTab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView? {
+    func tab(_ pwaTab: Tab, openInTorTab url: URL) { escapeScope(url) }
+    func tab(_ pwaTab: Tab, blockedPopupTo url: URL) {}
+    func tab(_ pwaTab: Tab, foundInstallableManifest manifest: WebAppManifest) {}
+    func tab(_ pwaTab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView? {
         escapeScope(url); return nil
     }
     func tabDidRequestClose(_ pwaTab: Tab) { dismiss(animated: true) }
-    func pwaTab(_ pwaTab: Tab, didPick selector: String, label: String) {}
+    func tab(_ pwaTab: Tab, didPick selector: String, label: String) {}
     func presenter(for pwaTab: Tab) -> UIViewController? { self }
 
     /// A navigation outside the installed app's scope opens in the normal
