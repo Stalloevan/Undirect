@@ -9,14 +9,14 @@ import WebKit
 final class StandalonePWAViewController: UIViewController {
 
     private let pwa: InstalledPWA
-    private let tab: Tab
+    private let pwaTab: Tab
     private let header = UIView()
     private let titleLabel = UILabel()
     private let progressView = UIProgressView(progressViewStyle: .bar)
 
     init(pwa: InstalledPWA) {
         self.pwa = pwa
-        self.tab = Tab(isTor: false)
+        self.pwaTab = Tab(isTor: false)
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -31,8 +31,8 @@ final class StandalonePWAViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = backgroundColor
-        tab.delegate = self
-        tab.scopeEscapeHandler = { [weak self] url in
+        pwaTab.delegate = self
+        pwaTab.scopeEscapeHandler = { [weak self] url in
             guard let self, !self.pwa.inScope(url) else { return false }
             self.escapeScope(url)
             return true
@@ -56,7 +56,7 @@ final class StandalonePWAViewController: UIViewController {
         menuButton.tintColor = titleLabel.textColor
         menuButton.showsMenuAsPrimaryAction = true
         menuButton.menu = UIMenu(children: [
-            UIAction(title: "Reload", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in self?.tab.webView.reload() },
+            UIAction(title: "Reload", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in self?.pwaTab.webView.reload() },
             UIAction(title: "Open in Browser", image: UIImage(systemName: "safari")) { [weak self] _ in self?.openInBrowser() },
             UIAction(title: "Uninstall App", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
                 guard let self else { return }
@@ -65,7 +65,7 @@ final class StandalonePWAViewController: UIViewController {
             }
         ])
 
-        let webView = tab.webView
+        let webView = pwaTab.webView
         progressView.progressTintColor = themeColor.isLight ? .darkGray : .white
         progressView.trackTintColor = .clear
 
@@ -107,7 +107,7 @@ final class StandalonePWAViewController: UIViewController {
         webView.isOpaque = false
         webView.backgroundColor = backgroundColor
 
-        if let url = pwa.startURLValue { tab.load(url) }
+        if let url = pwa.startURLValue { pwaTab.load(url) }
 
         progressObservation = webView.observe(\.estimatedProgress, options: [.new]) { [weak self] wv, _ in
             self?.progressView.progress = Float(wv.estimatedProgress)
@@ -120,7 +120,7 @@ final class StandalonePWAViewController: UIViewController {
     override var preferredStatusBarStyle: UIStatusBarStyle { themeColor.isLight ? .darkContent : .lightContent }
 
     private func openInBrowser() {
-        let url = tab.webView.url ?? pwa.startURLValue
+        let url = pwaTab.webView.url ?? pwa.startURLValue
         dismiss(animated: true) { [weak self] in
             guard let url, let scene = self?.view.window?.windowScene,
                   let browser = (scene.delegate as? SceneDelegate)?.browserForExternalOpen() else { return }
@@ -130,24 +130,24 @@ final class StandalonePWAViewController: UIViewController {
 }
 
 extension StandalonePWAViewController: TabDelegate {
-    func tabDidChange(_ tab: Tab) {
-        if let title = tab.webView.title, !title.isEmpty { /* keep app name, not page title */ }
+    func tabDidChange(_ pwaTab: Tab) {
+        if let title = pwaTab.webView.title, !title.isEmpty { /* keep app name, not page title */ }
     }
-    func tab(_ tab: Tab, toast message: String) {}
-    func tab(_ tab: Tab, openInNewTab url: URL) { escapeScope(url) }
-    func tab(_ tab: Tab, openInBackgroundTab url: URL) { escapeScope(url) }
-    func tab(_ tab: Tab, share url: URL) {
+    func pwaTab(_ pwaTab: Tab, toast message: String) {}
+    func pwaTab(_ pwaTab: Tab, openInNewTab url: URL) { escapeScope(url) }
+    func pwaTab(_ pwaTab: Tab, openInBackgroundTab url: URL) { escapeScope(url) }
+    func pwaTab(_ pwaTab: Tab, share url: URL) {
         present(UIActivityViewController(activityItems: [url], applicationActivities: nil), animated: true)
     }
-    func tab(_ tab: Tab, openInTorTab url: URL) { escapeScope(url) }
-    func tab(_ tab: Tab, blockedPopupTo url: URL) {}
-    func tab(_ tab: Tab, foundInstallableManifest manifest: WebAppManifest) {}
-    func tab(_ tab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView? {
+    func pwaTab(_ pwaTab: Tab, openInTorTab url: URL) { escapeScope(url) }
+    func pwaTab(_ pwaTab: Tab, blockedPopupTo url: URL) {}
+    func pwaTab(_ pwaTab: Tab, foundInstallableManifest manifest: WebAppManifest) {}
+    func pwaTab(_ pwaTab: Tab, createPopupWith configuration: WKWebViewConfiguration, url: URL) -> WKWebView? {
         escapeScope(url); return nil
     }
-    func tabDidRequestClose(_ tab: Tab) { dismiss(animated: true) }
-    func tab(_ tab: Tab, didPick selector: String, label: String) {}
-    func presenter(for tab: Tab) -> UIViewController? { self }
+    func tabDidRequestClose(_ pwaTab: Tab) { dismiss(animated: true) }
+    func pwaTab(_ pwaTab: Tab, didPick selector: String, label: String) {}
+    func presenter(for pwaTab: Tab) -> UIViewController? { self }
 
     /// A navigation outside the installed app's scope opens in the normal
     /// browser, so the standalone window only ever shows the app itself.
