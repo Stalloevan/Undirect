@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import WebKit
+import UIKit
 
 /// Runs a real Tor client inside the app (no VPN profile).
 ///
@@ -49,7 +50,25 @@ final class TorManager {
     private var control: TorControlSocket?
     private let controlQueue = DispatchQueue(label: "undirect.tor.control")
 
-    private init() {}
+    private init() {
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
+                                               name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    @objc private func appDidBecomeActive() {
+        guard state == .ready else { return }
+        // The control connection's raw socket is exactly the kind of thing
+        // iOS suspends while backgrounded; a quiet check-and-reconnect here
+        // means the *next* page load has a working connection instead of
+        // failing once first and only recovering after that.
+        controlQueue.async { [weak self] in
+            guard let self else { return }
+            if self.control?.send("GETINFO status/bootstrap-phase") == nil {
+                self.control?.close()
+                self.control = self.connectControl()
+            }
+        }
+    }
 
     /// Shared, in-memory data store for all Tor tabs. Nothing is written to disk
     /// and it is separate from normal browsing cookies.
@@ -144,6 +163,22 @@ final class TorManager {
     }
 
     /// Asks Tor for fresh circuits (new exit IP for new connections).
+    /// Re-establishes the control connection and asks for fresh circuits.
+    /// Doesn't restart Tor's own process — the embedded library can only run
+    /// once per app launch — but this recovers most cases where circuits
+    /// went stale from being backgrounded, without needing a relaunch.
+    func reconnectAfterForeground(completion: @escaping (Bool) -> Void) {
+        controlQueue.async { [weak self] in
+            guard let self else { DispatchQueue.main.async { completion(false) }; return }
+            if self.control?.send("GETINFO status/bootstrap-phase") == nil {
+                self.control?.close()
+                self.control = self.connectControl()
+            }
+            let ok = self.control?.send("SIGNAL NEWNYM")?.hasPrefix("250") ?? false
+            DispatchQueue.main.async { completion(ok) }
+        }
+    }
+
     func newIdentity(completion: @escaping (Bool) -> Void) {
         controlQueue.async {
             let ok = self.control?.send("SIGNAL NEWNYM")?.hasPrefix("250") ?? false

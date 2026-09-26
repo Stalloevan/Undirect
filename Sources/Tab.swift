@@ -416,6 +416,11 @@ extension Tab: WKNavigationDelegate {
         logNavigationError(error, stage: "Navigation")
     }
 
+    private static let connectionErrorCodes: Set<Int> = [
+        NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut,
+        NSURLErrorCannotFindHost, NSURLErrorNotConnectedToInternet, NSURLErrorDNSLookupFailed
+    ]
+
     private func logNavigationError(_ error: Error, stage: String) {
         let nsError = error as NSError
         // -999 is just "cancelled" — routine whenever a load is superseded
@@ -424,6 +429,27 @@ extension Tab: WKNavigationDelegate {
         let failing = (nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
             ?? webView.url?.absoluteString ?? lastKnownURL?.absoluteString ?? "?"
         AppLog.shared.log("\(stage) failed (\(isTor ? "Tor" : "normal") tab) for \(failing): \(nsError.localizedDescription) [\(nsError.domain) \(nsError.code)]", category: "nav")
+
+        // A failed load used to just silently leave the old page/address text
+        // in place — indistinguishable from the address bar "doing nothing".
+        // Always tell the person something actually happened.
+        guard nsError.domain == NSURLErrorDomain, Self.connectionErrorCodes.contains(nsError.code) else {
+            delegate?.tab(self, toast: "Couldn't load that page")
+            return
+        }
+        if isTor {
+            // Tor's own socket connections don't survive the app being
+            // backgrounded (iOS suspends them), so circuits already open when
+            // you left often can't be reused on return — this is what that
+            // looks like. A fresh identity forces new circuits.
+            delegate?.tab(self, toast: "Tor connection dropped (common after backgrounding) — reconnecting…")
+            TorManager.shared.reconnectAfterForeground { [weak self] ok in
+                guard let self else { return }
+                self.delegate?.tab(self, toast: ok ? "Tor reconnected — try again" : "Couldn't reconnect Tor — try again, or restart the app")
+            }
+        } else {
+            delegate?.tab(self, toast: "Couldn't connect — check your connection")
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
