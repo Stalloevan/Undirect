@@ -27,7 +27,7 @@ final class BrowserContainerViewController: UIViewController {
     private let addressBarBackdrop = UIView()
     private let addressField = UITextField()
     private let fieldBackground = UIView()
-    private let addressIcon = UIImageView()
+    private let addressIcon = UIButton(type: .system)
     private let reloadButton = UIButton(type: .system)
     private lazy var pageMenuButton = UIButton(type: .system)
     private let progressView = UIProgressView(progressViewStyle: .bar)
@@ -164,6 +164,8 @@ final class BrowserContainerViewController: UIViewController {
 
         addressIcon.tintColor = Theme.secondaryText
         addressIcon.contentMode = .scaleAspectFit
+        addressIcon.accessibilityLabel = "Tor for this tab"
+        addressIcon.addAction(UIAction { [weak self] _ in self?.toggleTor() }, for: .touchUpInside)
 
         addressField.textColor = Theme.text
         addressField.font = .systemFont(ofSize: 15)
@@ -238,12 +240,12 @@ final class BrowserContainerViewController: UIViewController {
             fieldBackground.topAnchor.constraint(equalTo: addressBar.topAnchor, constant: 7),
             fieldBackground.heightAnchor.constraint(equalToConstant: 36),
 
-            addressIcon.leadingAnchor.constraint(equalTo: fieldBackground.leadingAnchor, constant: 10),
+            addressIcon.leadingAnchor.constraint(equalTo: fieldBackground.leadingAnchor, constant: 4),
             addressIcon.centerYAnchor.constraint(equalTo: fieldBackground.centerYAnchor),
-            addressIcon.widthAnchor.constraint(equalToConstant: 16),
-            addressIcon.heightAnchor.constraint(equalToConstant: 16),
+            addressIcon.widthAnchor.constraint(equalToConstant: 28),
+            addressIcon.heightAnchor.constraint(equalToConstant: 28),
 
-            addressField.leadingAnchor.constraint(equalTo: addressIcon.trailingAnchor, constant: 8),
+            addressField.leadingAnchor.constraint(equalTo: addressIcon.trailingAnchor, constant: 2),
             addressField.trailingAnchor.constraint(equalTo: reloadButton.leadingAnchor, constant: -4),
             addressField.topAnchor.constraint(equalTo: fieldBackground.topAnchor),
             addressField.bottomAnchor.constraint(equalTo: fieldBackground.bottomAnchor),
@@ -646,16 +648,16 @@ final class BrowserContainerViewController: UIViewController {
             addressField.text = tab.url.map { DomainUtil.normalize($0.host ?? $0.absoluteString) } ?? ""
         }
         if tab.isTor {
-            addressIcon.image = OnionIcon.image(pointSize: 16)
+            addressIcon.setImage(OnionIcon.image(pointSize: 16), for: .normal)
             addressIcon.tintColor = Theme.tor
         } else if tab.url?.scheme == "http" {
-            addressIcon.image = Theme.icon("exclamationmark.triangle")
+            addressIcon.setImage(Theme.icon("exclamationmark.triangle"), for: .normal)
             addressIcon.tintColor = .systemOrange
         } else if tab.url != nil {
-            addressIcon.image = Theme.icon("lock.fill")
+            addressIcon.setImage(Theme.icon("lock.fill"), for: .normal)
             addressIcon.tintColor = Theme.secondaryText
         } else {
-            addressIcon.image = Theme.icon("magnifyingglass")
+            addressIcon.setImage(Theme.icon("magnifyingglass"), for: .normal)
             addressIcon.tintColor = Theme.secondaryText
         }
         if addressField.isFirstResponder {

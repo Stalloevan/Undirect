@@ -49,6 +49,10 @@ final class TorManager {
     private var torThread: Thread?
     private var control: TorControlSocket?
     private let controlQueue = DispatchQueue(label: "undirect.tor.control")
+    /// Set true right before the embedded tor_run_main() call returns —
+    /// the signal that it's actually safe to start a fresh one.
+    private var torThreadExited = false
+    private var restarting = false
 
     private init() {
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
@@ -57,17 +61,26 @@ final class TorManager {
 
     @objc private func appDidBecomeActive() {
         guard state == .ready else { return }
-        // The control connection's raw socket is exactly the kind of thing
-        // iOS suspends while backgrounded; a quiet check-and-reconnect here
-        // means the *next* page load has a working connection instead of
-        // failing once first and only recovering after that.
+        // Backgrounding suspends the raw sockets Tor's C networking loop
+        // depends on — both the control port *and* the SOCKS listener a
+        // WKWebView actually connects through. A NEWNYM alone (the old
+        // approach here) only rebuilds circuits; it can't revive a SOCKS
+        // listener that's already gone. A verified-dead SOCKS port means
+        // the whole embedded instance needs a real restart.
         controlQueue.async { [weak self] in
-            guard let self else { return }
-            if self.control?.send("GETINFO status/bootstrap-phase") == nil {
-                self.control?.close()
-                self.control = self.connectControl()
-            }
+            guard let self, self.probeSocksIsDead() else { return }
+            self.performHardRestart { _ in }
         }
+    }
+
+    /// True only once an actual TCP connect attempt to the SOCKS port fails —
+    /// distinct from the control port's own health, since they can go stale
+    /// independently.
+    private func probeSocksIsDead() -> Bool {
+        let socket = TorControlSocket()
+        let alive = socket.connect(port: socksPort)
+        socket.close()
+        return !alive
     }
 
     /// Shared, in-memory data store for all Tor tabs. Nothing is written to disk
@@ -88,6 +101,7 @@ final class TorManager {
 
     func start() {
         guard torThread == nil else { return }
+        torThreadExited = false
         state = .starting(0)
 
         let dir = dataDirectory
@@ -107,9 +121,14 @@ final class TorManager {
             "--Log", "notice stdout"
         ]
 
-        let thread = Thread {
+        let thread = Thread { [weak self] in
             TorManager.runTor(arguments: args)
-            TorManager.shared.state = .failed("Tor stopped")
+            self?.torThreadExited = true
+            // A restart in progress handles its own state transitions; only
+            // report a bare failure for an *unrequested* stop.
+            if self?.restarting != true {
+                TorManager.shared.state = .failed("Tor stopped")
+            }
         }
         thread.name = "tor"
         thread.stackSize = 8 * 1024 * 1024
@@ -162,20 +181,64 @@ final class TorManager {
         return socket
     }
 
-    /// Asks Tor for fresh circuits (new exit IP for new connections).
-    /// Re-establishes the control connection and asks for fresh circuits.
-    /// Doesn't restart Tor's own process — the embedded library can only run
-    /// once per app launch — but this recovers most cases where circuits
-    /// went stale from being backgrounded, without needing a relaunch.
+    /// The recovery path after a Tor tab hits a connection-refused error.
+    /// Tries a full restart when the SOCKS listener is confirmed dead;
+    /// otherwise a NEWNYM is enough (circuits stale, but the ports are fine).
     func reconnectAfterForeground(completion: @escaping (Bool) -> Void) {
         controlQueue.async { [weak self] in
             guard let self else { DispatchQueue.main.async { completion(false) }; return }
+            if self.probeSocksIsDead() {
+                self.performHardRestart(completion: completion)
+                return
+            }
             if self.control?.send("GETINFO status/bootstrap-phase") == nil {
                 self.control?.close()
                 self.control = self.connectControl()
             }
             let ok = self.control?.send("SIGNAL NEWNYM")?.hasPrefix("250") ?? false
             DispatchQueue.main.async { completion(ok) }
+        }
+    }
+
+    /// Stops the running embedded Tor instance via its own control protocol
+    /// (SIGNAL SHUTDOWN) and starts a fresh one on the same ports and data
+    /// directory — a real restart, not just a reconnect, without needing to
+    /// relaunch the app. Only impossible if the control port itself can't be
+    /// reached at all (no connection to ask Tor to stop through), in which
+    /// case a stale instance can't safely be replaced from inside the app.
+    /// Must be called on controlQueue.
+    private func performHardRestart(completion: @escaping (Bool) -> Void) {
+        guard !restarting else { DispatchQueue.main.async { completion(false) }; return }
+        restarting = true
+        AppLog.shared.log("Restarting Tor (SOCKS/control unreachable after backgrounding)", category: "tor")
+
+        if control?.send("GETINFO status/bootstrap-phase") == nil {
+            control?.close()
+            control = connectControl()
+        }
+        guard let control else {
+            restarting = false
+            AppLog.shared.log("Tor restart failed: control port unreachable", category: "tor")
+            DispatchQueue.main.async { completion(false) }
+            return
+        }
+        _ = control.send("SIGNAL SHUTDOWN")
+        control.close()
+        self.control = nil
+
+        let deadline = Date().addingTimeInterval(10)
+        while !torThreadExited && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        torThread = nil
+        restarting = false
+
+        if !torThreadExited {
+            AppLog.shared.log("Tor restart failed: old instance didn't stop in time", category: "tor")
+            DispatchQueue.main.async { completion(false) }
+            return
+        }
+        DispatchQueue.main.async {
+            self.start()
+            completion(true)
         }
     }
 
