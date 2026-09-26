@@ -59,13 +59,18 @@ final class ShareViewController: UIViewController {
         return comps.url
     }
 
-    /// Extensions can't call UIApplication.shared.open directly, but the
-    /// extension process's UIApplication is reachable up the responder chain.
+    /// Extensions can't call UIApplication.open directly (it's marked
+    /// extension-unavailable), but the extension process's application object
+    /// is reachable up the responder chain, so the same method is invoked
+    /// through the Objective-C runtime instead.
     private func openHostApp(_ url: URL) {
+        let selector = NSSelectorFromString("openURL:options:completionHandler:")
+        typealias OpenFunction = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, AnyObject?) -> Void
         var responder: UIResponder? = self
         while let current = responder {
-            if let app = current as? UIApplication {
-                app.open(url, options: [:], completionHandler: nil)
+            if current.responds(to: selector), let implementation = current.method(for: selector) {
+                let open = unsafeBitCast(implementation, to: OpenFunction.self)
+                open(current, selector, url as NSURL, NSDictionary(), nil)
                 return
             }
             responder = current.next

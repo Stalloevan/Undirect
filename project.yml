@@ -79,6 +79,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stalloevan.undirect.share
         GENERATE_INFOPLIST_FILE: "NO"
-        APPLICATION_EXTENSION_API_ONLY: "NO"
+        APPLICATION_EXTENSION_API_ONLY: "YES"
         MARKETING_VERSION: "3.9"
         CURRENT_PROJECT_VERSION: "24"
