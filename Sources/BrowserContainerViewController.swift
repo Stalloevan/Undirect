@@ -42,8 +42,8 @@ final class BrowserContainerViewController: UIViewController {
     private var pulloutTrailing: NSLayoutConstraint!
     private let contentView = UIView()
     private let ntp = NewTabPageViewController()
-    private let torOverlay = TorConnectingView()
     private let pickerBanner = PickerBanner()
+    private let recordingBanner = RecordingBanner()
 
     private var sidebarState: SidebarState = Settings.shared.sidebarState
 
@@ -97,12 +97,14 @@ final class BrowserContainerViewController: UIViewController {
             self?.navigationController?.pushViewController(NTPLayoutViewController(), animated: true)
         }
 
-        torOverlay.frame = contentView.bounds
-        torOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        contentView.addSubview(torOverlay)
-        torOverlay.onCancel = { [weak self] in self?.cancelTorWaitOnCurrentTab() }
+        // No full-screen "Connecting to Tor" overlay: a waiting Tor tab shows
+        // its address, the onion, and Tor's progress in the progress bar, and
+        // the ✕ button cancels the wait.
+        AutomationHost.browser = self
 
         let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(recorderChanged), name: AutomationRecorder.didChange, object: nil)
+        nc.addObserver(self, selector: #selector(handleOpenLocalFile(_:)), name: LocalFiles.openNotification, object: nil)
         nc.addObserver(self, selector: #selector(rulesUpdated), name: ContentBlocker.didUpdate, object: nil)
         nc.addObserver(self, selector: #selector(rulesUpdated), name: DomainSetStore.didChange, object: nil)
         nc.addObserver(self, selector: #selector(torStateChanged), name: TorManager.stateDidChange, object: nil)
@@ -134,6 +136,7 @@ final class BrowserContainerViewController: UIViewController {
         }
         restoreSession()
         sessionRestored = true
+        LocalFiles.prune(keeping: tabs.compactMap { $0.url })
         let queued = pendingExternalURLs
         pendingExternalURLs = []
         for url in queued { openTab(url: url) }
@@ -276,6 +279,10 @@ final class BrowserContainerViewController: UIViewController {
         fieldBackground.addSubview(pageMenuButton)
         pickerBanner.isHidden = true
         pickerBanner.onCancel = { [weak self] in self?.stopPicking() }
+        recordingBanner.isHidden = true
+        recordingBanner.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(recordingBanner)
+        recordingBanner.onStop = { [weak self] in self?.stopRecording() }
 
         let safe = view.safeAreaLayoutGuide
 
@@ -346,7 +353,11 @@ final class BrowserContainerViewController: UIViewController {
 
             pickerBanner.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
             pickerBanner.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
-            pickerBanner.bottomAnchor.constraint(equalTo: addressBar.topAnchor, constant: -10)
+            pickerBanner.bottomAnchor.constraint(equalTo: addressBar.topAnchor, constant: -10),
+
+            recordingBanner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            recordingBanner.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
+            recordingBanner.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -24)
         ])
 
         NSLayoutConstraint.activate([
@@ -682,6 +693,7 @@ final class BrowserContainerViewController: UIViewController {
 
     private func close(tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        if AutomationRecorder.shared.tab === tab { stopRecording() }
         if pickingTab === tab { stopPicking() }
         tab.webView.stopLoading()
         tab.webView.removeFromSuperview()
@@ -717,6 +729,7 @@ final class BrowserContainerViewController: UIViewController {
 
     func navigate(to url: URL) {
         guard let tab = currentTab else { openTab(url: url); return }
+        AutomationRecorder.shared.recordOpen(url, in: tab)
         tab.load(url)
         updateChrome()
     }
@@ -797,8 +810,23 @@ final class BrowserContainerViewController: UIViewController {
         if !ntp.view.isHidden && !ntpWasVisible { ntp.reload() }
         ntpWasVisible = !ntp.view.isHidden
 
-        torOverlay.isHidden = !tab.isWaitingForTor
-        torOverlay.update(state: TorManager.shared.state)
+        if tab.isWaitingForTor {
+            // Tor's own progress, in the normal progress bar.
+            let fraction: Float
+            switch TorManager.shared.state {
+            case .starting(let p): fraction = max(0.05, Float(p) / 100)
+            case .reconnecting: fraction = 0.1
+            default: fraction = 0.05
+            }
+            progressView.setProgress(fraction, animated: fraction > progressView.progress)
+            progressView.progressTintColor = Theme.tor
+            progressView.isHidden = false
+            reloadButton.setImage(Theme.icon("xmark"), for: .normal)
+            reloadButton.isHidden = false
+            reloadButton.accessibilityLabel = "Stop connecting"
+        } else {
+            progressView.progressTintColor = Theme.accent
+        }
 
         applySidebarPosition()
         refreshSidebar()
@@ -876,6 +904,11 @@ final class BrowserContainerViewController: UIViewController {
             updateChrome()
             return
         }
+        if let tab = currentTab, tab.isWaitingForTor {
+            tab.cancelPendingLoad()
+            showToast("Stopped waiting for Tor")
+            return
+        }
         guard let wv = currentTab?.webView else { return }
         if wv.isLoading { wv.stopLoading() } else { wv.reload() }
     }
@@ -906,6 +939,133 @@ final class BrowserContainerViewController: UIViewController {
         if let url { tab.load(url) }
         showCurrentTab()
         showToast("Loading without Tor")
+    }
+
+    // MARK: Automation
+
+    var isReadyForAutomation: Bool { sessionRestored && isViewLoaded }
+    var automationTab: Tab? { currentTab }
+
+    func automationNavigate(to url: URL) {
+        if let tab = currentTab, tab.isPopup == false { tab.load(url) } else { openTab(url: url) }
+    }
+
+    func automationTabURLs() -> [String] {
+        tabs.map { $0.url?.absoluteString ?? "" }
+    }
+
+    func automationSelectTab(at index: Int) -> Bool {
+        guard tabs.indices.contains(index) else { return false }
+        select(index: index)
+        return true
+    }
+
+    func automationCloseCurrentTab() {
+        if let tab = currentTab { close(tab: tab) }
+    }
+
+    private func startRecording() {
+        guard let tab = currentTab else { return }
+        AutomationRecorder.shared.start(on: tab)
+        showToast("Recording — do the steps, then tap Stop")
+    }
+
+    private func stopRecording() {
+        let steps = AutomationRecorder.shared.finish()
+        guard !steps.isEmpty else { showToast("Nothing was recorded"); return }
+        let alert = UIAlertController(title: "Save Automation",
+                                      message: "\(steps.count) step\(steps.count == 1 ? "" : "s") recorded. Run it from Shortcuts with “Run Automation in Undirect”.",
+                                      preferredStyle: .alert)
+        alert.addTextField { f in
+            f.placeholder = "Name"
+            f.text = self.currentTab?.webView.title.flatMap { $0.isEmpty ? nil : $0 }
+            f.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "Discard", style: .destructive))
+        let saveNamed: (String?, Bool) -> Void = { [weak self] name, edit in
+            let trimmed = name?.trimmingCharacters(in: .whitespaces) ?? ""
+            let automation = BrowserAutomation(name: trimmed.isEmpty ? "Automation" : trimmed, steps: steps)
+            AutomationStore.shared.upsert(automation)
+            if edit {
+                let editor = AutomationEditorViewController(automation: automation)
+                editor.onRun = { [weak self] in self?.runAutomationFromApp($0) }
+                self?.navigationController?.pushViewController(editor, animated: true)
+            } else {
+                self?.showToast("Saved “\(automation.name)”")
+            }
+        }
+        alert.addAction(UIAlertAction(title: "Save & Edit Steps", style: .default) { [weak alert] _ in
+            saveNamed(alert?.textFields?.first?.text, true)
+        })
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak alert] _ in
+            saveNamed(alert?.textFields?.first?.text, false)
+        })
+        present(alert, animated: true)
+    }
+
+    @objc private func recorderChanged() {
+        let recorder = AutomationRecorder.shared
+        recordingBanner.isHidden = !recorder.isRecording
+        recordingBanner.update(stepCount: recorder.steps.count)
+    }
+
+    private func showAutomations() {
+        let list = AutomationListViewController()
+        list.onRun = { [weak self] in self?.runAutomationFromApp($0) }
+        navigationController?.pushViewController(list, animated: true)
+    }
+
+    /// "Run Now" from the editor: back to the page, then run on the current tab.
+    func runAutomationFromApp(_ automation: BrowserAutomation) {
+        navigationController?.popToViewController(self, animated: true)
+        showToast("Running “\(automation.name)”…")
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await AutomationRunner.shared.run(automation, input: nil)
+                self?.showToast("“\(automation.name)” finished")
+            } catch {
+                self?.showToast(error.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: Local HTML files
+
+    private var filePickerDelegate: LocalFilePickerDelegate?
+
+    private func pickLocalFile() {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: LocalFiles.openableTypes, asCopy: true)
+        let delegate = LocalFilePickerDelegate { [weak self] url in
+            self?.filePickerDelegate = nil
+            guard let url else { return }
+            self?.openLocalFile(url, move: true)
+        }
+        filePickerDelegate = delegate
+        picker.delegate = delegate
+        present(picker, animated: true)
+    }
+
+    /// Opens an HTML file (from Files, the share sheet, a download or the
+    /// picker) in a new normal tab, from Undirect's own copy of it.
+    func openLocalFile(_ source: URL, move: Bool = false) {
+        guard LocalFiles.isOpenable(source) else {
+            showToast("Undirect can open HTML files and web archives")
+            return
+        }
+        guard let copy = LocalFiles.importFile(source, move: move) else {
+            showToast("Couldn't open \(source.lastPathComponent)")
+            return
+        }
+        guard sessionRestored else {
+            pendingExternalURLs.append(copy)
+            return
+        }
+        openTab(url: copy, tor: false)
+    }
+
+    @objc private func handleOpenLocalFile(_ note: Notification) {
+        guard let url = note.object as? URL else { return }
+        openLocalFile(url, move: true)
     }
 
     /// Actions for the whole page, reached from the ⋯ button in the address bar.
@@ -940,6 +1100,20 @@ final class BrowserContainerViewController: UIViewController {
             }
         }
 
+        let recording = AutomationRecorder.shared.isRecording
+        let automationActions: [UIMenuElement] = [
+            UIAction(title: recording ? "Stop Recording" : "Record Automation",
+                     image: Theme.icon(recording ? "stop.circle" : "record.circle")) { [weak self] _ in
+                if recording { self?.stopRecording() } else { self?.startRecording() }
+            },
+            UIAction(title: "Automations", image: Theme.icon("wand.and.stars")) { [weak self] _ in
+                self?.showAutomations()
+            },
+            UIAction(title: "Open HTML File…", image: Theme.icon("doc.richtext")) { [weak self] _ in
+                self?.pickLocalFile()
+            }
+        ]
+
         let appActions: [UIMenuElement] = [
             UIAction(title: "Settings", image: Theme.icon("gearshape")) { [weak self] _ in
                 let settings = SettingsViewController()
@@ -947,7 +1121,9 @@ final class BrowserContainerViewController: UIViewController {
                 self?.navigationController?.pushViewController(settings, animated: true)
             }
         ]
-        return [UIMenu(options: .displayInline, children: pageActions), UIMenu(options: .displayInline, children: appActions)]
+        return [UIMenu(options: .displayInline, children: pageActions),
+                UIMenu(options: .displayInline, children: automationActions),
+                UIMenu(options: .displayInline, children: appActions)]
     }
 
     /// Actions for one specific tab, reached by long-pressing it in the sidebar.
@@ -1469,4 +1645,53 @@ final class ToastTapRecognizer: UITapGestureRecognizer {
         addTarget(self, action: #selector(fire))
     }
     @objc private func fire() { handler() }
+}
+
+/// "● Recording · N steps  Stop" — floats at the top while recording.
+final class RecordingBanner: UIView {
+    var onStop: (() -> Void)?
+    private let label = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor(red: 0.78, green: 0.12, blue: 0.16, alpha: 0.95)
+        layer.cornerRadius = 18
+        let dot = UIView()
+        dot.backgroundColor = .white
+        dot.layer.cornerRadius = 4
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.widthAnchor.constraint(equalToConstant: 8).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        label.textColor = .white
+        label.font = .systemFont(ofSize: 14, weight: .semibold)
+        let button = UIButton(type: .system)
+        button.setTitle("Stop", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 14, weight: .bold)
+        button.tintColor = .white
+        button.addAction(UIAction { [weak self] _ in self?.onStop?() }, for: .touchUpInside)
+        let stack = UIStackView(arrangedSubviews: [dot, label, button])
+        stack.spacing = 10
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6)
+        ])
+        update(stepCount: 0)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update(stepCount: Int) {
+        label.text = "Recording · \(stepCount) step\(stepCount == 1 ? "" : "s")"
+    }
+}
+
+final class LocalFilePickerDelegate: NSObject, UIDocumentPickerDelegate {
+    let done: (URL?) -> Void
+    init(done: @escaping (URL?) -> Void) { self.done = done }
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { done(urls.first) }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { done(nil) }
 }

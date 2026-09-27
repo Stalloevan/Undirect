@@ -45,6 +45,15 @@ targets:
           NSAllowsArbitraryLoads: true
         # Downloads kept in Undirect show up in Files › On My iPhone › Undirect.
         UIFileSharingEnabled: true
+        # Lets Files / the share sheet open HTML pages and web archives in Undirect.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Web Page
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.html
+              - public.xhtml
+              - com.apple.webarchive
         LSSupportsOpeningDocumentsInPlace: true
         NSPhotoLibraryAddUsageDescription: "Undirect saves downloaded photos and videos to your library when a download rule says to."
         CFBundleURLTypes:

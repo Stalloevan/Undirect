@@ -110,23 +110,74 @@ struct DownloadPreset {
 /// Apps that accept a web link through their URL scheme. The link is handed
 /// over *instead of* downloading — the app fetches or streams it itself, so
 /// the file goes straight there with no share sheet.
+///
+/// Template placeholders: %u = the link, fully encoded (for query values);
+/// %r = the link exactly as-is; %n = the link without its "https://".
+/// The sideloading entries were checked against each app's own source code.
 struct AppTarget {
     let name: String
     let template: String
+    /// Which kinds of file this app is for (MIME patterns); empty = anything.
+    let handles: [String]
+
+    enum Category: String, CaseIterable {
+        case ipa = "iOS apps (IPA)"
+        case video = "Video & audio"
+        case browsers = "Other browsers (any file)"
+    }
+    let category: Category
 
     static let presets: [AppTarget] = [
-        AppTarget(name: "VLC (stream)", template: "vlc-x-callback://x-callback-url/stream?url=%u"),
-        AppTarget(name: "VLC (download into VLC)", template: "vlc-x-callback://x-callback-url/download?url=%u"),
-        AppTarget(name: "Infuse", template: "infuse://x-callback-url/play?url=%u"),
-        AppTarget(name: "nPlayer", template: "nplayer-%r")
+        // Sideloading — verified against each project's URL handler.
+        AppTarget(name: "Feather", template: "feather://install/%r",
+                  handles: ["application/x-ios-app", "application/octet-stream"], category: .ipa),
+        AppTarget(name: "AltStore", template: "altstore://install?url=%u",
+                  handles: ["application/x-ios-app", "application/octet-stream"], category: .ipa),
+        AppTarget(name: "TrollStore", template: "apple-magnifier://install?url=%u",
+                  handles: ["application/x-ios-app", "application/octet-stream"], category: .ipa),
+        // Media players — their documented x-callback / URL schemes.
+        AppTarget(name: "VLC (stream)", template: "vlc-x-callback://x-callback-url/stream?url=%u",
+                  handles: ["video/*", "audio/*"], category: .video),
+        AppTarget(name: "VLC (download into VLC)", template: "vlc-x-callback://x-callback-url/download?url=%u",
+                  handles: ["video/*", "audio/*"], category: .video),
+        AppTarget(name: "Infuse", template: "infuse://x-callback-url/play?url=%u",
+                  handles: ["video/*", "audio/*"], category: .video),
+        AppTarget(name: "nPlayer", template: "nplayer-%r",
+                  handles: ["video/*", "audio/*"], category: .video),
+        // Browsers can download or view almost anything.
+        AppTarget(name: "Safari", template: "x-safari-https://%n", handles: [], category: .browsers),
+        AppTarget(name: "Chrome", template: "googlechromes://%n", handles: [], category: .browsers),
+        AppTarget(name: "Firefox", template: "firefox://open-url?url=%u", handles: [], category: .browsers),
+        AppTarget(name: "Edge", template: "microsoft-edge-https://%n", handles: [], category: .browsers)
     ]
+
+    /// Presets that suit a rule's file types, most relevant first.
+    static func suggestions(for patterns: [String]) -> [AppTarget] {
+        let lowered = patterns.map { $0.lowercased() }
+        let isIPA = lowered.contains("application/x-ios-app")
+        func relevant(_ t: AppTarget) -> Bool {
+            if t.handles.isEmpty { return false }
+            if isIPA { return t.category == .ipa }
+            return t.handles.contains { h in
+                lowered.contains { p in
+                    p == h || (h.hasSuffix("/*") && p.hasPrefix(String(h.dropLast()))) ||
+                    (p.hasSuffix("/*") && h.hasPrefix(String(p.dropLast())))
+                }
+            } && t.category != .ipa
+        }
+        return presets.filter(relevant)
+    }
 
     static func expand(_ template: String, with url: URL) -> URL? {
         let strict = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        let encoded = url.absoluteString.addingPercentEncoding(withAllowedCharacters: strict) ?? url.absoluteString
+        let raw = url.absoluteString
+        let encoded = raw.addingPercentEncoding(withAllowedCharacters: strict) ?? raw
+        var noScheme = raw
+        if let range = raw.range(of: "://") { noScheme = String(raw[range.upperBound...]) }
         let filled = template
             .replacingOccurrences(of: "%u", with: encoded)
-            .replacingOccurrences(of: "%r", with: url.absoluteString)
+            .replacingOccurrences(of: "%r", with: raw)
+            .replacingOccurrences(of: "%n", with: noScheme)
         return URL(string: filled)
     }
 }
@@ -299,6 +350,11 @@ final class DownloadManager: NSObject {
         let add: (DownloadAction, String) -> Void = { [weak self] action, title in
             sheet.addAction(UIAlertAction(title: title, style: .default) { _ in
                 self?.perform(action, rule: nil, fileURL: fileURL, filename: filename, mime: mime)
+            })
+        }
+        if LocalFiles.isOpenable(URL(fileURLWithPath: filename)) {
+            sheet.addAction(UIAlertAction(title: "Open in Undirect", style: .default) { _ in
+                NotificationCenter.default.post(name: LocalFiles.openNotification, object: fileURL)
             })
         }
         add(.openIn, "Open in App…")
@@ -774,9 +830,15 @@ final class DownloadSettingsViewController: UITableViewController {
             updated.folderName = nil
             DownloadRuleStore.shared.upsert(updated)
         }
-        for target in AppTarget.presets {
-            sheet.addAction(UIAlertAction(title: target.name, style: .default) { _ in save(target.name, target.template) })
+        // Apps suited to this rule's file type first, then every other preset
+        // grouped by what it's for.
+        let suggested = AppTarget.suggestions(for: rule.patterns)
+        for target in suggested {
+            sheet.addAction(UIAlertAction(title: "★ " + target.name, style: .default) { _ in save(target.name, target.template) })
         }
+        sheet.addAction(UIAlertAction(title: suggested.isEmpty ? "Choose an App…" : "Other Apps…", style: .default) { [weak self] _ in
+            self?.pickFromAllApps(except: suggested.map(\.name), save: save)
+        })
         sheet.addAction(UIAlertAction(title: "A Shortcut…", style: .default) { [weak self] _ in
             self?.promptText(title: "Run a Shortcut",
                              message: "Enter the exact name of the shortcut. It receives the link as text input, so it can send it to any app.",
@@ -787,9 +849,9 @@ final class DownloadSettingsViewController: UITableViewController {
         })
         sheet.addAction(UIAlertAction(title: "Custom URL scheme…", style: .default) { [weak self] _ in
             self?.promptText(title: "Custom app URL",
-                             message: "Use %u for the link (encoded) or %r for the link as-is, e.g. myapp://open?url=%u",
+                             message: "Use %u for the link (encoded), %r for the link as-is, or %n for the link without https://, e.g. myapp://open?url=%u",
                              placeholder: "myapp://open?url=%u") { template in
-                guard template.contains("%u") || template.contains("%r"),
+                guard template.contains("%u") || template.contains("%r") || template.contains("%n"),
                       let scheme = template.split(separator: ":").first, !scheme.isEmpty else {
                     self?.alert("That needs a scheme (like myapp://) and %u or %r where the link goes.")
                     return
@@ -797,6 +859,21 @@ final class DownloadSettingsViewController: UITableViewController {
                 save(String(scheme), template)
             }
         })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        DownloadManager.anchor(sheet, in: self)
+        present(sheet, animated: true)
+    }
+
+    private func pickFromAllApps(except skip: [String], save: @escaping (String, String) -> Void) {
+        let sheet = UIAlertController(title: "Send to…", message: nil, preferredStyle: .actionSheet)
+        for category in AppTarget.Category.allCases {
+            let targets = AppTarget.presets.filter { $0.category == category && !skip.contains($0.name) }
+            for target in targets {
+                sheet.addAction(UIAlertAction(title: "\(target.name)  ·  \(category.rawValue)", style: .default) { _ in
+                    save(target.name, target.template)
+                })
+            }
+        }
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         DownloadManager.anchor(sheet, in: self)
         present(sheet, animated: true)

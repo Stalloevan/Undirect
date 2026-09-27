@@ -64,6 +64,21 @@ final class Tab: NSObject {
     // Redirect / click-through state
     private var lastTapPoint: CGPoint?
     private var lastTapAt: Date?
+    /// Set by the automation runner around its taps/Enter presses, so those
+    /// navigations count as user-initiated (they're what you recorded or
+    /// asked a Shortcut to do) instead of being blocked as redirects.
+    private var automationGrantUntil: Date?
+    private var automationGranted: Bool { automationGrantUntil.map { Date() < $0 } ?? false }
+
+    func grantAutomationNavigation(seconds: TimeInterval = 4) {
+        automationGrantUntil = Date().addingTimeInterval(seconds)
+        userChainActive = true
+    }
+
+    /// The automation recorder's script, kept across script reinstalls.
+    var recorderScript: WKUserScript? {
+        didSet { reinstallScripts() }
+    }
     private var retryChain = 0
     private let maxRetryChain = 4
     /// A URL the app itself (or the person, via the address bar) asked to load.
@@ -174,6 +189,13 @@ final class Tab: NSObject {
 
     func load(_ url: URL) {
         expectedURL = url
+        if url.isFileURL {
+            // Local HTML opened from Files / the share sheet. Read access is
+            // limited to the file's own folder inside Undirect's storage.
+            pendingURL = nil
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            return
+        }
         if isTor && !TorManager.shared.isReady {
             pendingURL = url
             TorManager.shared.ensureRunning()
@@ -208,6 +230,14 @@ final class Tab: NSObject {
         delegate?.tabDidChange(self)
     }
 
+    /// Stops waiting for Tor without loading anything (the address bar's ✕).
+    func cancelPendingLoad() {
+        guard pendingURL != nil else { return }
+        pendingURL = nil
+        expectedURL = nil
+        delegate?.tabDidChange(self)
+    }
+
     func torBecameReady() {
         guard let url = pendingURL else { return }
         pendingURL = nil
@@ -224,6 +254,7 @@ final class Tab: NSObject {
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         WebEngine.installScripts(on: controller, messageName: messageName, tor: isTor)
+        if let recorderScript { controller.addUserScript(recorderScript) }
     }
 
     func applyContentRules(for host: String?, force: Bool = false) {
@@ -346,6 +377,12 @@ extension Tab: WKNavigationDelegate {
             decisionHandler(proceed)
             return
         }
+        if scheme == "file" {
+            // Only files Undirect itself copied in (opened HTML); never
+            // arbitrary paths a page tries to reach.
+            decisionHandler(LocalFiles.contains(url) ? proceed : .cancel)
+            return
+        }
         if scheme != "http" && scheme != "https" {
             decisionHandler(.cancel)
             // mailto:, tel:, app links — only when the person actually tapped them.
@@ -418,6 +455,7 @@ extension Tab: WKNavigationDelegate {
         let userInitiated = type == .linkActivated || type == .formSubmitted || type == .formResubmitted
         let allowed = trusted
             || userInitiated
+            || automationGranted
             || userChainActive
             || currentHost == nil
             || DomainUtil.sameSite(currentHost, destHost)
@@ -733,6 +771,13 @@ extension Tab: WKUIDelegate {
         // blocking it as one.
         if let targetFrame = action.targetFrame, !targetFrame.isMainFrame {
             webView.load(action.request)
+            return nil
+        }
+
+        if automationGranted, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            // An automation step clicked something that opens a new window:
+            // follow it in this tab so the rest of the steps keep working.
+            webView.load(Self.request(for: url))
             return nil
         }
 

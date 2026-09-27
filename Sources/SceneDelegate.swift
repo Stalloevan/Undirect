@@ -73,6 +73,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     private func handle(_ contexts: Set<UIOpenURLContext>) {
         for context in contexts {
+            if context.url.isFileURL {
+                // An HTML file from Files / "Open in Undirect". Copy it if it
+                // was opened in place, take it over if iOS handed us a copy.
+                browser?.openLocalFile(context.url, move: !context.options.openInPlace)
+                continue
+            }
             guard let target = Self.target(from: context.url) else {
                 AppLog.shared.log("Ignored incoming link: \(context.url.absoluteString.prefix(120))", category: "app")
                 continue
