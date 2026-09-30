@@ -74,6 +74,8 @@ final class ImmersiveViewController: UIViewController {
 
         let threeFingerTap = UITapGestureRecognizer(target: self, action: #selector(exitTapped))
         threeFingerTap.numberOfTouchesRequired = 3
+        threeFingerTap.cancelsTouchesInView = false
+        threeFingerTap.delegate = self
         view.addGestureRecognizer(threeFingerTap)
 
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
@@ -97,4 +99,10 @@ final class ImmersiveViewController: UIViewController {
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
+}
+
+extension ImmersiveViewController: UIGestureRecognizerDelegate {
+    // WebKit's own gestures would otherwise swallow the three-finger tap.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
 }

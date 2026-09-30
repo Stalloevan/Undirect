@@ -104,6 +104,7 @@ final class BrowserContainerViewController: UIViewController {
 
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(recorderChanged), name: AutomationRecorder.didChange, object: nil)
+        nc.addObserver(self, selector: #selector(tabFinishedLoading(_:)), name: Tab.didFinishPageLoad, object: nil)
         nc.addObserver(self, selector: #selector(handleOpenLocalFile(_:)), name: LocalFiles.openNotification, object: nil)
         nc.addObserver(self, selector: #selector(rulesUpdated), name: ContentBlocker.didUpdate, object: nil)
         nc.addObserver(self, selector: #selector(rulesUpdated), name: DomainSetStore.didChange, object: nil)
@@ -450,6 +451,24 @@ final class BrowserContainerViewController: UIViewController {
 
     /// Opens `url` as a normal tab (so it's right there with full chrome once
     /// the person exits) and immediately covers it with the chromeless viewer.
+    /// Full-screen, no browser UI, for the tab that's showing. Exit with a
+    /// three-finger tap (or by leaving and reopening the app).
+    func enterImmersive(tab: Tab? = nil) {
+        guard presentedViewController == nil, let tab = tab ?? currentTab else { return }
+        if let index = tabs.firstIndex(where: { $0 === tab }), index != selectedIndex { select(index: index) }
+        guard !tab.isBlank else { showToast("Open a page first"); return }
+        let vc = ImmersiveViewController(tab: tab)
+        vc.onExit = { [weak self] in
+            self?.dismiss(animated: false) { self?.showCurrentTab() }
+        }
+        present(vc, animated: false)
+    }
+
+    @objc private func handleThreeFingerTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        enterImmersive()
+    }
+
     private func presentImmersive(url: URL) {
         if presentedViewController != nil { dismiss(animated: false) }
         let tab = openTab(url: url, select: true)
@@ -465,6 +484,14 @@ final class BrowserContainerViewController: UIViewController {
         tap.cancelsTouchesInView = false
         tap.delegate = self
         contentView.addGestureRecognizer(tap)
+
+        // Three-finger tap toggles immersive mode (the same gesture exits it).
+        let threeFingers = UITapGestureRecognizer(target: self, action: #selector(handleThreeFingerTap(_:)))
+        threeFingers.numberOfTouchesRequired = 3
+        threeFingers.cancelsTouchesInView = false
+        threeFingers.delegate = self
+        view.addGestureRecognizer(threeFingers)
+        tap.require(toFail: threeFingers)
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePagePan(_:)))
         pan.cancelsTouchesInView = false
@@ -982,25 +1009,39 @@ final class BrowserContainerViewController: UIViewController {
             f.clearButtonMode = .whileEditing
         }
         alert.addAction(UIAlertAction(title: "Discard", style: .destructive))
-        let saveNamed: (String?, Bool) -> Void = { [weak self] name, edit in
+        let site = BrowserAutomation(name: "", steps: steps).firstSite
+            ?? currentTab?.webView.url?.host.map(DomainUtil.normalize)
+        let saveNamed: (String?, Bool, Bool) -> Void = { [weak self] name, edit, autoRun in
             let trimmed = name?.trimmingCharacters(in: .whitespaces) ?? ""
-            let automation = BrowserAutomation(name: trimmed.isEmpty ? "Automation" : trimmed, steps: steps)
+            var automation = BrowserAutomation(name: trimmed.isEmpty ? "Automation" : trimmed, steps: steps)
+            if autoRun { automation.autoRunSite = site }
             AutomationStore.shared.upsert(automation)
             if edit {
                 let editor = AutomationEditorViewController(automation: automation)
                 editor.onRun = { [weak self] in self?.runAutomationFromApp($0) }
                 self?.navigationController?.pushViewController(editor, animated: true)
             } else {
-                self?.showToast("Saved “\(automation.name)”")
+                self?.showToast(autoRun ? "Saved — runs on every visit to \(site ?? "the site")" : "Saved “\(automation.name)”")
             }
         }
         alert.addAction(UIAlertAction(title: "Save & Edit Steps", style: .default) { [weak alert] _ in
-            saveNamed(alert?.textFields?.first?.text, true)
+            saveNamed(alert?.textFields?.first?.text, true, false)
         })
+        if let site, !steps.contains(where: \.usesInput) {
+            alert.addAction(UIAlertAction(title: "Save & Run on Every Visit to \(site)", style: .default) { [weak alert] _ in
+                saveNamed(alert?.textFields?.first?.text, false, true)
+            })
+        }
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak alert] _ in
-            saveNamed(alert?.textFields?.first?.text, false)
+            saveNamed(alert?.textFields?.first?.text, false, false)
         })
         present(alert, animated: true)
+    }
+
+    @objc private func tabFinishedLoading(_ note: Notification) {
+        guard let tab = note.object as? Tab, tabs.contains(where: { $0 === tab }),
+              AutomationRecorder.shared.tab !== tab else { return }
+        AutomationRunner.shared.pageDidLoad(in: tab)
     }
 
     @objc private func recorderChanged() {
@@ -1131,6 +1172,12 @@ final class BrowserContainerViewController: UIViewController {
         guard tabs.indices.contains(index) else { return nil }
         let tab = tabs[index]
         var actions: [UIMenuElement] = []
+
+        if tab.webView.url != nil {
+            actions.append(UIAction(title: "Immersive Mode", image: Theme.icon("arrow.up.left.and.arrow.down.right")) { [weak self] _ in
+                self?.enterImmersive(tab: tab)
+            })
+        }
 
         if let url = tab.webView.url {
             let isFav = FavoritesStore.shared.isFavorite(url: url)

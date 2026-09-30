@@ -78,6 +78,24 @@ struct BrowserAutomation: Codable, Equatable {
     var name: String
     var steps: [AutomationStep]
     var created = Date()
+    /// When set, the automation runs by itself every time a page on this
+    /// site (or its subdomains) finishes loading.
+    var autoRunSite: String?
+
+    func autoRuns(on host: String?) -> Bool {
+        guard let site = autoRunSite?.lowercased(), !site.isEmpty, let host = host?.lowercased() else { return false }
+        let h = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        let s = site.hasPrefix("www.") ? String(site.dropFirst(4)) : site
+        return h == s || h.hasSuffix("." + s)
+    }
+
+    /// Host of the first "Open URL" step, if any — the natural default site.
+    var firstSite: String? {
+        steps.first { $0.kind == .open && !$0.usesInput }
+            .flatMap { $0.value }
+            .flatMap { URL(string: $0.contains("://") ? $0 : "https://" + $0)?.host }
+            .map(DomainUtil.normalize)
+    }
 }
 
 final class AutomationStore {
@@ -321,6 +339,16 @@ final class AutomationRecorder: NSObject, WKScriptMessageHandler {
 final class AutomationRunner {
     static let shared = AutomationRunner()
 
+    /// True while a whole automation is running (auto-runs wait their turn
+    /// rather than interleaving with it).
+    private(set) var isBusy = false
+    /// The tab an automation is bound to (an auto-run may target a tab
+    /// that isn't the one showing).
+    private weak var pinnedTab: Tab?
+    /// Per tab+automation: when it last finished auto-running, so a page
+    /// reload caused by the automation itself doesn't start it again.
+    private var lastAutoRun: [String: Date] = [:]
+
     /// Finds an element by CSS selector, else by its visible text/label.
     private static let findJS = #"""
     function __find(target) {
@@ -357,6 +385,7 @@ final class AutomationRunner {
     }
 
     func currentTab() async throws -> Tab {
+        if let pinnedTab { return pinnedTab }
         let browser = try await browser()
         guard let tab = browser.automationTab else { throw AutomationError("There's no open tab.") }
         return tab
@@ -427,6 +456,11 @@ final class AutomationRunner {
     // MARK: Primitives
 
     func navigate(to url: URL) async throws {
+        if let pinnedTab {
+            pinnedTab.load(url)
+            try await waitForLoad(pinnedTab, timeout: 45)
+            return
+        }
         let browser = try await browser()
         browser.automationNavigate(to: url)
         guard let tab = browser.automationTab else { return }
@@ -650,12 +684,24 @@ final class AutomationRunner {
 
     /// Runs every step on the current tab. Steps marked "Shortcut input"
     /// take the next line of `input`. Returns the final page's URL.
-    func run(_ automation: BrowserAutomation, input: String?) async throws -> String {
+    func run(_ automation: BrowserAutomation, input: String?, on tab: Tab? = nil,
+             skipLeadingOpen: Bool = false) async throws -> String {
         var inputs = (input ?? "").components(separatedBy: .newlines)
         if input == nil || input?.isEmpty == true { inputs = [] }
         AppLog.shared.log("Running automation “\(automation.name)” (\(automation.steps.count) steps)", category: "automation")
 
+        isBusy = true
+        pinnedTab = tab
+        defer {
+            isBusy = false
+            pinnedTab = nil
+        }
+        // An auto-run starts on the page that's already loaded, so any
+        // opening "go to the site" steps are redundant.
+        var skipping = skipLeadingOpen
         for (index, step) in automation.steps.enumerated() {
+            if skipping, step.kind == .open { continue }
+            skipping = false
             var value = step.value ?? ""
             if step.usesInput {
                 guard !inputs.isEmpty else {
@@ -670,6 +716,35 @@ final class AutomationRunner {
             }
         }
         return try await pageDetail(.url)
+    }
+
+    /// Called whenever any tab finishes loading a page.
+    func pageDidLoad(in tab: Tab) {
+        guard !isBusy, let host = tab.webView.url?.host else { return }
+        let matches = AutomationStore.shared.all().filter { $0.autoRuns(on: host) }
+        guard !matches.isEmpty else { return }
+        let tabKey = ObjectIdentifier(tab).hashValue
+        Task { @MainActor in
+            for automation in matches {
+                let key = "\(tabKey)|\(automation.id)"
+                if let last = lastAutoRun[key], Date().timeIntervalSince(last) < 5 { continue }
+                if automation.steps.contains(where: \.usesInput) {
+                    AppLog.shared.log("Skipped auto-run of “\(automation.name)”: it needs Shortcut input", category: "automation")
+                    continue
+                }
+                guard !isBusy else { return }
+                do {
+                    _ = try await run(automation, input: nil, on: tab, skipLeadingOpen: true)
+                } catch {
+                    AppLog.shared.log("Auto-run “\(automation.name)” failed: \(error.localizedDescription)", category: "automation")
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: DownloadManager.toastNotification,
+                                                        object: "Auto-run “\(automation.name)” stopped — \(error.localizedDescription)")
+                    }
+                }
+                lastAutoRun[key] = Date()
+            }
+        }
     }
 
     private func perform(_ step: AutomationStep, value: String) async throws {

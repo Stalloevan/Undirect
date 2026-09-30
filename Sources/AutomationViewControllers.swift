@@ -50,6 +50,7 @@ final class AutomationListViewController: UITableViewController {
         let inputs = item.steps.filter(\.usesInput).count
         cell.detailTextLabel?.text = "\(item.steps.count) step\(item.steps.count == 1 ? "" : "s")"
             + (inputs > 0 ? " · \(inputs) input\(inputs == 1 ? "" : "s")" : "")
+            + (item.autoRunSite.map { " · runs on every visit to \($0)" } ?? "")
         cell.detailTextLabel?.textColor = Theme.secondaryText
         cell.accessoryType = .disclosureIndicator
         return cell
@@ -117,16 +118,36 @@ final class AutomationEditorViewController: UITableViewController {
     }
 
     // MARK: Table
+    // Section 0: run automatically on a site. Section 1: the steps.
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { max(automation.steps.count, 1) }
+    private let stepsSection = 1
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        section == 0 ? 1 : max(automation.steps.count, 1)
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        section == 0 ? nil : "Steps"
+    }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        "Runs on whichever tab is showing. Tap a step to edit it; steps using Shortcut input take one line of the Run Automation action's Input each, in order. Elements are found by their recorded selector, or by their text if the site has changed."
+        if section == 0 {
+            if automation.steps.contains(where: \.usesInput) {
+                return "Steps that use Shortcut input can't run automatically — give them fixed values to enable this."
+            }
+            return "Runs by itself each time a page on this site finishes loading, in any tab. Opening “Open URL” steps are skipped, since the page is already there. Tap the row to change the site."
+        }
+        return "Runs on whichever tab is showing. Tap a step to edit it; steps using Shortcut input take one line of the Run Automation action's Input each, in order. Elements are found by their recorded selector, or by their text if the site has changed."
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
         cell.backgroundColor = Theme.surface
+        if indexPath.section == 0 {
+            return autoRunCell(cell)
+        }
         guard !automation.steps.isEmpty else {
             cell.textLabel?.text = "No steps — tap + to add one"
             cell.textLabel?.textColor = Theme.secondaryText
@@ -158,8 +179,78 @@ final class AutomationEditorViewController: UITableViewController {
         return cell
     }
 
-    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool { !automation.steps.isEmpty }
-    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool { automation.steps.count > 1 }
+    private func autoRunCell(_ cell: UITableViewCell) -> UITableViewCell {
+        let blocked = automation.steps.contains(where: \.usesInput)
+        cell.textLabel?.text = "Run on every visit"
+        cell.textLabel?.textColor = blocked ? Theme.secondaryText : Theme.text
+        let site = automation.autoRunSite ?? automation.firstSite
+        cell.detailTextLabel?.text = site.map { "to \($0)" } ?? "Tap to choose a site"
+        cell.detailTextLabel?.textColor = Theme.secondaryText
+        let toggle = UISwitch()
+        toggle.isOn = automation.autoRunSite != nil
+        toggle.isEnabled = !blocked
+        toggle.onTintColor = Theme.accent
+        toggle.addAction(UIAction { [weak self] action in
+            guard let self, let sw = action.sender as? UISwitch else { return }
+            if sw.isOn {
+                if let site = self.automation.autoRunSite ?? self.automation.firstSite {
+                    self.automation.autoRunSite = site
+                    self.save()
+                } else {
+                    sw.setOn(false, animated: true)
+                    self.editAutoRunSite()
+                }
+            } else {
+                self.automation.autoRunSite = nil
+                self.save()
+            }
+        }, for: .valueChanged)
+        cell.accessoryView = toggle
+        return cell
+    }
+
+    private func editAutoRunSite() {
+        guard !automation.steps.contains(where: \.usesInput) else { return }
+        let alert = UIAlertController(title: "Run on every visit to…",
+                                      message: "A site like example.com (its subdomains are included).",
+                                      preferredStyle: .alert)
+        alert.addTextField { [weak self] f in
+            f.text = self?.automation.autoRunSite ?? self?.automation.firstSite
+            f.placeholder = "example.com"
+            f.keyboardType = .URL
+            f.autocapitalizationType = .none
+            f.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        if automation.autoRunSite != nil {
+            alert.addAction(UIAlertAction(title: "Turn Off", style: .destructive) { [weak self] _ in
+                self?.automation.autoRunSite = nil
+                self?.save()
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+            let text = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !text.isEmpty,
+                  let host = URL(string: text.contains("://") ? text : "https://" + text)?.host,
+                  host.contains(".") else { return }
+            self?.automation.autoRunSite = DomainUtil.normalize(host)
+            self?.save()
+        })
+        present(alert, animated: true)
+    }
+
+    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
+        indexPath.section == stepsSection && !automation.steps.isEmpty
+    }
+
+    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
+        indexPath.section == stepsSection && automation.steps.count > 1
+    }
+
+    override func tableView(_ tableView: UITableView, targetIndexPathForMoveFromRowAt source: IndexPath,
+                            toProposedIndexPath proposed: IndexPath) -> IndexPath {
+        proposed.section == stepsSection ? proposed : IndexPath(row: 0, section: stepsSection)
+    }
 
     override func tableView(_ tableView: UITableView, moveRowAt source: IndexPath, to destination: IndexPath) {
         let step = automation.steps.remove(at: source.row)
@@ -168,13 +259,15 @@ final class AutomationEditorViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, commit editingStyle: UITableViewCell.EditingStyle, forRowAt indexPath: IndexPath) {
-        guard editingStyle == .delete, automation.steps.indices.contains(indexPath.row) else { return }
+        guard editingStyle == .delete, indexPath.section == stepsSection,
+              automation.steps.indices.contains(indexPath.row) else { return }
         automation.steps.remove(at: indexPath.row)
         save()
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == 0 { editAutoRunSite(); return }
         guard automation.steps.indices.contains(indexPath.row) else { return }
         editStep(at: indexPath.row, from: tableView.cellForRow(at: indexPath))
     }

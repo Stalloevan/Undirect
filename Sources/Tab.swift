@@ -554,7 +554,12 @@ extension Tab: WKNavigationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.samplePageBackground() }
         detectManifest()
         delegate?.tabDidChange(self)
+        NotificationCenter.default.post(name: Tab.didFinishPageLoad, object: self)
     }
+
+    /// Posted (object: the Tab) whenever a page finishes loading — used to
+    /// start automations set to run on every visit to a site.
+    static let didFinishPageLoad = Notification.Name("UndirectTabDidFinishPageLoad")
 
     /// Reads a page's web-app manifest (and Apple/theme meta fallbacks) so the
     /// container can offer to install it. Runs in the page world since it must
