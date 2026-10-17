@@ -255,6 +255,7 @@ final class MediaPlayback {
         return JSON.stringify({ url: url, kind: kind, dash: dash, hasVideo: !!m,
                                 time: m && isFinite(m.currentTime) ? m.currentTime : 0,
                                 ua: navigator.userAgent, page: location.href,
+                                lang: (navigator.languages || [navigator.language]).map(function (l, i) { return i ? l + ';q=' + Math.max(0.1, 1 - i * 0.1).toFixed(1) : l; }).join(','),
                                 title: (navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title) || document.title || '' });
         """
 
@@ -285,7 +286,9 @@ final class MediaPlayback {
             tab.webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
                 let context = CastRelay.Context(cookies: cookies,
                                                 userAgent: (info["ua"] as? String) ?? "Mozilla/5.0",
-                                                referer: page, isTor: tab.isTor)
+                                                referer: page, isTor: tab.isTor,
+                                                acceptLanguage: info["lang"] as? String,
+                                                pageFetcher: PageFetcher(webView: tab.webView, frame: targetFrame))
                 CastSession.start(stream: streamURL, context: context,
                                   title: (info["title"] as? String) ?? tab.title,
                                   startAt: (info["time"] as? Double) ?? 0, from: host)

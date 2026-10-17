@@ -28,6 +28,11 @@ final class CastRelay {
         var userAgent: String
         var referer: URL?
         var isTor: Bool
+        var acceptLanguage: String?
+        /// Fetches through the page itself (preferred): the site sees the
+        /// browser's exact request — cookies, Origin, Referer, Sec-Fetch
+        /// headers, Tor — because it *is* the browser's request.
+        var pageFetcher: PageFetcher?
     }
 
     enum RelayError: LocalizedError {
@@ -51,6 +56,7 @@ final class CastRelay {
     private var routeIDs: [String: String] = [:]
     private var activeTasks: [ObjectIdentifier: RelayTask] = [:]
     private var loggedFailure = false
+    private var loggedPageSuccess = false
 
     private init() {}
 
@@ -71,6 +77,7 @@ final class CastRelay {
             self.context = context
             self.token = Self.randomHex(16)
             self.loggedFailure = false
+            self.loggedPageSuccess = false
 
             let config = URLSessionConfiguration.ephemeral
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -205,21 +212,78 @@ final class CastRelay {
             return Self.sendStatus(404, on: connection)
         }
 
-        var request = URLRequest(url: upstream)
-        request.httpMethod = method
-        request.setValue(context.userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        if let referer = context.referer {
-            request.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
-            if let scheme = referer.scheme, let refHost = referer.host {
-                let origin = "\(scheme)://\(refHost)" + (referer.port.map { ":\($0)" } ?? "")
-                // Only cross-site fetches carry Origin, as in the browser.
-                if refHost.lowercased() != upstream.host?.lowercased() {
-                    request.setValue(origin, forHTTPHeaderField: "Origin")
+        // Whole files and playlist/segment requests go through the page.
+        // Byte-range requests (large single files) stream over URLSession so
+        // the phone never holds a whole movie in memory.
+        if headers["range"] == nil, let fetcher = context.pageFetcher {
+            fetcher.fetch(upstream) { [weak self] result in
+                self?.queue.async {
+                    guard let self else { return }
+                    switch result {
+                    case .success(let response):
+                        self.sendPageResponse(response, for: upstream, isHead: method == "HEAD", on: connection)
+                    case .failure(let error):
+                        self.logUpstreamFailure("page fetch failed (\(error.localizedDescription)); trying directly")
+                        self.startSessionTask(upstream: upstream, method: method, range: nil, context: context,
+                                              session: session, on: connection)
+                    }
                 }
             }
+            return
         }
-        if let range = headers["range"] { request.setValue(range, forHTTPHeaderField: "Range") }
+        startSessionTask(upstream: upstream, method: method, range: headers["range"], context: context,
+                         session: session, on: connection)
+    }
+
+    private func sendPageResponse(_ response: PageFetcher.Response, for upstream: URL, isHead: Bool,
+                                  on connection: NWConnection) {
+        if response.status >= 400 {
+            logUpstreamFailure("site answered \(response.status) to the page for \(upstream.host ?? "?")")
+        } else if !loggedPageSuccess {
+            loggedPageSuccess = true
+            AppLog.shared.log("Cast relay: fetching through the page works (\(upstream.host ?? "?"))", category: "media")
+        }
+        var body = response.body
+        var type = response.contentType
+        let looksLikePlaylist = type.lowercased().contains("mpegurl")
+            || upstream.path.lowercased().hasSuffix(".m3u8")
+            || body.starts(with: Data("#EXTM3U".utf8))
+        if looksLikePlaylist {
+            let text = String(decoding: body, as: UTF8.self)
+            body = Data(rewritePlaylist(text, base: response.finalURL ?? upstream).utf8)
+            type = "application/vnd.apple.mpegurl"
+        }
+        var head = "HTTP/1.1 \(response.status) OK\r\n"
+        if !type.isEmpty { head += "Content-Type: \(type)\r\n" }
+        head += "Content-Length: \(body.count)\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        var out = Data(head.utf8)
+        if !isHead { out.append(body) }
+        connection.send(content: out, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    private func startSessionTask(upstream: URL, method: String, range: String?, context: Context,
+                                  session: URLSession, on connection: NWConnection) {
+        var request = URLRequest(url: upstream)
+        request.httpMethod = method
+        // As close to the browser's own media request as URLSession allows.
+        request.setValue(context.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        if let lang = context.acceptLanguage { request.setValue(lang, forHTTPHeaderField: "Accept-Language") }
+        request.setValue("empty", forHTTPHeaderField: "Sec-Fetch-Dest")
+        request.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
+        if let referer = context.referer, let scheme = referer.scheme, let refHost = referer.host {
+            let origin = "\(scheme)://\(refHost)" + (referer.port.map { ":\($0)" } ?? "")
+            let sameOrigin = refHost.lowercased() == upstream.host?.lowercased() && scheme == upstream.scheme
+            let sameSite = DomainUtil.sameSite(refHost, upstream.host ?? "")
+            request.setValue(sameOrigin ? "same-origin" : (sameSite ? "same-site" : "cross-site"),
+                             forHTTPHeaderField: "Sec-Fetch-Site")
+            // Browsers send only the origin as Referer to other sites
+            // (strict-origin-when-cross-origin), plus an Origin header.
+            request.setValue(sameOrigin ? referer.absoluteString : origin + "/", forHTTPHeaderField: "Referer")
+            if !sameOrigin { request.setValue(origin, forHTTPHeaderField: "Origin") }
+        }
+        if let range { request.setValue(range, forHTTPHeaderField: "Range") }
         let cookies = Self.cookies(context.cookies, for: upstream)
         for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
             request.setValue(value, forHTTPHeaderField: name)
@@ -436,5 +500,83 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
         connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
                         completion: .contentProcessed { [connection] _ in connection.cancel() })
         relay?.finished(self)
+    }
+}
+
+/// Fetches cast media from inside the page (the frame the video plays in),
+/// in Undirect's isolated script world so the page can't interfere. The
+/// request is the browser's own, so it passes whatever checks the site
+/// applies to its player — and goes through Tor in Tor tabs.
+final class PageFetcher {
+    struct Response {
+        let status: Int
+        let contentType: String
+        let finalURL: URL?
+        let body: Data
+    }
+
+    struct FetchError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    private weak var webView: WKWebView?
+    private let frame: WKFrameInfo?
+
+    init(webView: WKWebView, frame: WKFrameInfo?) {
+        self.webView = webView
+        self.frame = frame
+    }
+
+    private static let js = """
+        const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        const blob = await r.blob();
+        const dataURL = await new Promise(function (resolve, reject) {
+          const fr = new FileReader();
+          fr.onload = function () { resolve(fr.result); };
+          fr.onerror = function () { reject(fr.error); };
+          fr.readAsDataURL(blob);
+        });
+        const comma = dataURL.indexOf(',');
+        return { status: r.status, type: r.headers.get('content-type') || '', url: r.url || '',
+                 data: comma >= 0 ? dataURL.slice(comma + 1) : '' };
+        """
+
+    /// Completion runs on the main queue. Times out after 25 s (e.g. if iOS
+    /// has paused the page while Undirect is in the background).
+    func fetch(_ url: URL, completion: @escaping (Result<Response, Error>) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let webView = self.webView else {
+                completion(.failure(FetchError(message: "the page is gone")))
+                return
+            }
+            var finished = false
+            let finish: (Result<Response, Error>) -> Void = { result in
+                guard !finished else { return }
+                finished = true
+                completion(result)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+                finish(.failure(FetchError(message: "the page didn't respond")))
+            }
+            webView.callAsyncJavaScript(Self.js, arguments: ["url": url.absoluteString], in: self.frame,
+                                        in: .defaultClient) { result in
+                switch result {
+                case .failure(let error):
+                    finish(.failure(error))
+                case .success(let value):
+                    guard let dict = value as? [String: Any],
+                          let status = (dict["status"] as? NSNumber)?.intValue else {
+                        finish(.failure(FetchError(message: "unexpected response")))
+                        return
+                    }
+                    let body = (dict["data"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data()
+                    finish(.success(Response(status: status,
+                                             contentType: (dict["type"] as? String) ?? "",
+                                             finalURL: (dict["url"] as? String).flatMap(URL.init(string:)),
+                                             body: body)))
+                }
+            }
+        }
     }
 }
