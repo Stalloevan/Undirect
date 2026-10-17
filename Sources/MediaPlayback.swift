@@ -1,7 +1,6 @@
 import UIKit
 import WebKit
 import AVFoundation
-import AVKit
 import MediaPlayer
 
 /// Web audio/video that keeps going while you use other apps:
@@ -43,11 +42,10 @@ final class MediaPlayback {
     /// active when a page actually plays something, so opening Undirect
     /// never interrupts music from another app.
     func configureAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
-        } catch {
-            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-        }
+        // Default route sharing: the long-form-video policy hands the whole
+        // app's output to the TV as if it were a native video player, which
+        // left the TV on a loading spinner for web video.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     }
 
     var keepsTorAwake: Bool {
@@ -206,10 +204,9 @@ final class MediaPlayback {
           m = vids[0];
         }
         if (!m) return 'none';
-        // You asked to cast, so undo a site's own "no AirPlay" switch. DRM
-        // video can still refuse to play on the TV.
-        try { m.disableRemotePlayback = false; } catch (e) {}
-        if (m.getAttribute('x-webkit-airplay') === 'deny') m.setAttribute('x-webkit-airplay', 'allow');
+        // A site that turns AirPlay off usually streams in a way the TV can't
+        // play (forcing it on just gives a spinner), so respect it.
+        if (m.disableRemotePlayback || m.getAttribute('x-webkit-airplay') === 'deny') return 'blocked';
         if (typeof m.webkitShowPlaybackTargetPicker !== 'function') return 'unsupported';
         window.__undirectActiveMedia = m;
         m.webkitShowPlaybackTargetPicker();
@@ -221,31 +218,17 @@ final class MediaPlayback {
         let targetFrame = self.tab === tab ? frame : nil
         tab.webView.callAsyncJavaScript(Self.castJS, arguments: [:], in: targetFrame, in: .defaultClient) { [weak self, weak host] result in
             let outcome = (try? result.get()) as? String
-            guard outcome != "ok", let host else { return }
-            if outcome == "none" && !(self?.hasVideo(tab) ?? false) {
+            guard outcome != "ok", host != nil else { return }
+            switch outcome {
+            case "blocked":
+                self?.toast("This site doesn't allow AirPlay for its videos")
+            case "none" where !(self?.hasVideo(tab) ?? false):
                 self?.toast("No video on this page to cast")
-                return
+            default:
+                // Usually a video inside an embedded player: the native
+                // player's own AirPlay button reaches it.
+                self?.toast("Play the video fullscreen, then tap its AirPlay button")
             }
-            // The video lives in an embedded frame (or the page blocks the
-            // picker): fall back to the system AirPlay picker.
-            self?.showSystemRoutePicker(in: host.view)
-        }
-    }
-
-    private var routePicker: AVRoutePickerView?
-
-    private func showSystemRoutePicker(in view: UIView) {
-        let picker = routePicker ?? AVRoutePickerView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
-        picker.prioritizesVideoDevices = true
-        picker.alpha = 0.01
-        if picker.superview !== view { view.addSubview(picker) }
-        routePicker = picker
-        // AVRoutePickerView has no public "show" call; tapping its button is
-        // the supported way to bring the picker up.
-        if let button = picker.subviews.compactMap({ $0 as? UIButton }).first {
-            button.sendActions(for: .touchUpInside)
-        } else {
-            toast("Start the video, then use its AirPlay button")
         }
     }
 

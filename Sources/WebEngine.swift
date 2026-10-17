@@ -13,10 +13,10 @@ enum WebEngine {
         // window after leaving the app from a fullscreen video.
         config.allowsAirPlayForMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
-        // Lets sites' own players (with their own controls, captions and
-        // quality menus) go fullscreen instead of falling back to the
-        // basic system player.
-        config.preferences.isElementFullscreenEnabled = true
+        // Element fullscreen is deliberately left off: with it, sites detect
+        // the Fullscreen API and swap in their own players (different page
+        // UI, and streams AirPlay often can't play). Without it, fullscreen
+        // video uses the native iOS player and its AirPlay button.
         config.defaultWebpagePreferences.preferredContentMode = .mobile
         return config
     }
