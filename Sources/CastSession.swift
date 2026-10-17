@@ -56,7 +56,8 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
         })
     }
 
-    static func start(stream: URL, context: CastRelay.Context, title: String, startAt: Double, from host: UIViewController) {
+    static func start(stream: URL, context: CastRelay.Context, title: String, startAt: Double,
+                      from host: UIViewController, showPicker: Bool = true) {
         current?.end()
         CastRelay.shared.start(upstream: stream, context: context) { result in
             switch result {
@@ -66,7 +67,7 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
                 MediaPlayback.shared.yieldToNativePlayer()
                 let session = CastSession(relayURL: relayURL, isTor: context.isTor, title: title, startAt: startAt)
                 current = session
-                session.present(from: host)
+                session.present(from: host, showPicker: showPicker)
             }
         }
     }
@@ -82,7 +83,7 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
         }
     }
 
-    private func present(from host: UIViewController) {
+    private func present(from host: UIViewController, showPicker: Bool) {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.delegate = self
@@ -96,7 +97,11 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
             self?.player.play()
             self?.startWatchdog()
             // Straight to the AirPlay picker — that's why you're here.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.showAirPlayPicker(in: controller.view) }
+            // From the video's own AirPlay button the TV is already chosen;
+            // only ask when it isn't connected a moment later.
+            DispatchQueue.main.asyncAfter(deadline: .now() + (showPicker ? 0.4 : 2.5)) {
+                self?.showAirPlayPicker(in: controller.view)
+            }
         }
     }
 

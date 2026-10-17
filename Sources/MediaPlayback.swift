@@ -97,8 +97,16 @@ final class MediaPlayback {
 
         let wireless = (body["wireless"] as? Bool) ?? false
         if wireless && !isCasting {
-            toast("Playing on AirPlay. If the TV keeps loading, use ⋯ › Cast with AirPlay instead")
-            AppLog.shared.log("AirPlay started on \(tab.host ?? "?")", category: "media")
+            AppLog.shared.log("AirPlay chosen in the video player on \(tab.host ?? "?") — switching to relayed casting", category: "media")
+            // WebKit's AirPlay makes the TV fetch the video itself, which
+            // many sites refuse (endless loading). The TV is already chosen,
+            // so hand the video to the relayed native player on that route.
+            if CastSession.current == nil, let browser = AutomationHost.browser {
+                toast("Sending to your TV through Undirect…")
+                DispatchQueue.main.async {
+                    self.castCurrentVideo(in: tab, from: browser, routeAlreadyChosen: true)
+                }
+            }
         }
         isCasting = wireless
 
@@ -252,6 +260,9 @@ final class MediaPlayback {
         if (!url) { url = first(/\\.(mp4|m4v|mov)(\\?|#|$)/i); if (url) kind = 'file'; }
         var dash = !url && !!first(/\\.mpd(\\?|#|$)/i);
         if (m && !m.paused) { try { m.pause(); } catch (e) {} }
+        // Leave WebKit's fullscreen player, which sits in its own window
+        // above the cast player.
+        if (m && m.webkitDisplayingFullscreen) { try { m.webkitExitFullscreen(); } catch (e) {} }
         return JSON.stringify({ url: url, kind: kind, dash: dash, hasVideo: !!m,
                                 time: m && isFinite(m.currentTime) ? m.currentTime : 0,
                                 ua: navigator.userAgent, page: location.href,
@@ -261,7 +272,7 @@ final class MediaPlayback {
 
     /// ⋯ › Cast with AirPlay: plays the page's video in the native player,
     /// relayed through the phone so the TV gets the same access the page has.
-    func castCurrentVideo(in tab: Tab, from host: UIViewController) {
+    func castCurrentVideo(in tab: Tab, from host: UIViewController, routeAlreadyChosen: Bool = false) {
         let key = ObjectIdentifier(tab)
         let targetFrame = (self.tab === tab ? frame : nil) ?? videoFrames[key]
         tab.webView.callAsyncJavaScript(Self.discoverJS, arguments: [:], in: targetFrame, in: .defaultClient) { [weak self, weak host, weak tab] result in
@@ -291,7 +302,8 @@ final class MediaPlayback {
                                                 pageFetcher: PageFetcher(webView: tab.webView, frame: targetFrame))
                 CastSession.start(stream: streamURL, context: context,
                                   title: (info["title"] as? String) ?? tab.title,
-                                  startAt: (info["time"] as? Double) ?? 0, from: host)
+                                  startAt: (info["time"] as? Double) ?? 0, from: host,
+                                  showPicker: !routeAlreadyChosen)
             }
         }
     }
