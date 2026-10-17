@@ -193,7 +193,25 @@ final class MediaPlayback {
 
     // MARK: AirPlay
 
-    private static let castJS = """
+    /// Lifts a site's AirPlay block from a video — but only when the TV can
+    /// actually fetch it. Streams assembled on the phone (blob: / MediaSource)
+    /// can't be played by the TV, and forcing AirPlay on them is what gives a
+    /// spinner (and can stop Managed Media Source playback on the phone).
+    static let unblockJS = """
+        function __undirectPhoneOnly(m) {
+          var src = m.currentSrc || m.src || '';
+          return !!m.srcObject || src.indexOf('blob:') === 0 || src.indexOf('mediasource:') === 0;
+        }
+        function __undirectAllowAirPlay(m) {
+          if (!(m instanceof HTMLVideoElement) || __undirectPhoneOnly(m)) return false;
+          var changed = false;
+          if (m.disableRemotePlayback) { try { m.disableRemotePlayback = false; changed = true; } catch (e) {} }
+          if (m.getAttribute('x-webkit-airplay') === 'deny') { m.setAttribute('x-webkit-airplay', 'allow'); changed = true; }
+          return changed;
+        }
+        """
+
+    private static let castJS = unblockJS + """
         var m = window.__undirectActiveMedia;
         if (!m || !m.isConnected) {
           var vids = Array.prototype.slice.call(document.querySelectorAll('video'));
@@ -204,9 +222,8 @@ final class MediaPlayback {
           m = vids[0];
         }
         if (!m) return 'none';
-        // A site that turns AirPlay off usually streams in a way the TV can't
-        // play (forcing it on just gives a spinner), so respect it.
-        if (m.disableRemotePlayback || m.getAttribute('x-webkit-airplay') === 'deny') return 'blocked';
+        __undirectAllowAirPlay(m);
+        if (m.disableRemotePlayback || m.getAttribute('x-webkit-airplay') === 'deny') return 'phoneonly';
         if (typeof m.webkitShowPlaybackTargetPicker !== 'function') return 'unsupported';
         window.__undirectActiveMedia = m;
         m.webkitShowPlaybackTargetPicker();
@@ -220,8 +237,8 @@ final class MediaPlayback {
             let outcome = (try? result.get()) as? String
             guard outcome != "ok", host != nil else { return }
             switch outcome {
-            case "blocked":
-                self?.toast("This site doesn't allow AirPlay for its videos")
+            case "phoneonly":
+                self?.toast("This video is streamed in a way only the phone can play, so it can't be sent to a TV. Screen Mirroring from Control Center still works.")
             case "none" where !(self?.hasVideo(tab) ?? false):
                 self?.toast("No video on this page to cast")
             default:
@@ -248,6 +265,20 @@ final class MediaPlayback {
           var NAME = '\(messageName)';
           function post(m) { try { window.webkit.messageHandlers[NAME].postMessage(m); } catch (e) {} }
           var active = null;
+          \(unblockJS)
+          function allow(m) { try { __undirectAllowAirPlay(m); } catch (e) {} }
+          // Sites set these switches when the player is built and sometimes
+          // re-set them later; undo them whenever they reappear, so the native
+          // player's controls keep their AirPlay button.
+          try {
+            new MutationObserver(function (records) {
+              for (var i = 0; i < records.length; i++) {
+                var t = records[i].target;
+                if (t instanceof HTMLVideoElement) allow(t);
+              }
+            }).observe(document, { subtree: true, attributes: true,
+                                   attributeFilter: ['disableremoteplayback', 'x-webkit-airplay', 'src'] });
+          } catch (e) {}
           function meta() {
             var md = navigator.mediaSession && navigator.mediaSession.metadata;
             return { title: (md && md.title) || document.title || '', artist: (md && md.artist) || '' };
@@ -264,6 +295,7 @@ final class MediaPlayback {
           function onEvent(e) {
             var m = e.target;
             if (!(m instanceof HTMLMediaElement)) return;
+            if (e.type === 'loadedmetadata' || e.type === 'playing') allow(m);
             switch (e.type) {
               case 'playing':
                 // Tiny muted clips (looping backgrounds, previews) aren't "media".
