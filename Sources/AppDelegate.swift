@@ -7,6 +7,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        // Lets web audio/video keep playing (and AirPlay keep streaming)
+        // in the background and with the silent switch on, like Safari.
+        MediaPlayback.shared.configureAudioSession()
         return true
     }
 

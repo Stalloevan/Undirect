@@ -9,6 +9,14 @@ enum WebEngine {
         config.allowsInlineMediaPlayback = true
         // No autoplaying video/audio: faster pages, less data.
         config.mediaTypesRequiringUserActionForPlayback = .all
+        // Cast to Apple TV / AirPlay TVs, and keep watching in a floating
+        // window after leaving the app from a fullscreen video.
+        config.allowsAirPlayForMediaPlayback = true
+        config.allowsPictureInPictureMediaPlayback = true
+        // Lets sites' own players (with their own controls, captions and
+        // quality menus) go fullscreen instead of falling back to the
+        // basic system player.
+        config.preferences.isElementFullscreenEnabled = true
         config.defaultWebpagePreferences.preferredContentMode = .mobile
         return config
     }
@@ -32,6 +40,7 @@ enum WebEngine {
         add(viewportFallbackScript, mainFrameOnly: false, world: world)
         add(darkThemeScript, mainFrameOnly: false, world: world)
         add(agentScript(messageName: messageName), mainFrameOnly: false, world: world)
+        add(MediaPlayback.script(messageName: messageName), mainFrameOnly: false, world: world)
         add(pickerScript(messageName: messageName), mainFrameOnly: true, world: world)
         add(ElementHideStore.shared.scriptSource(), mainFrameOnly: false, world: world)
         if Settings.shared.autoHandleCookieBanners {

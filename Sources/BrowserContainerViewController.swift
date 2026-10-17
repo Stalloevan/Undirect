@@ -721,6 +721,7 @@ final class BrowserContainerViewController: UIViewController {
     private func close(tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         if AutomationRecorder.shared.tab === tab { stopRecording() }
+        MediaPlayback.shared.tabDidLeavePage(tab)
         if pickingTab === tab { stopPicking() }
         tab.webView.stopLoading()
         tab.webView.removeFromSuperview()
@@ -1123,6 +1124,12 @@ final class BrowserContainerViewController: UIViewController {
                 TorManager.shared.newIdentity { ok in
                     if ok { tab.webView.reload() }
                 }
+            })
+        }
+        if tab.webView.url != nil, MediaPlayback.shared.hasVideo(tab) {
+            pageActions.append(UIAction(title: "Cast with AirPlay", image: Theme.icon("airplayvideo")) { [weak self] _ in
+                guard let self else { return }
+                MediaPlayback.shared.castCurrentVideo(in: tab, from: self)
             })
         }
         if let url = tab.webView.url {

@@ -308,8 +308,25 @@ final class TorManager {
 
     // MARK: Background / foreground
 
+    /// Playback stopped: if we're in the background, resume the normal
+    /// "sleep before suspension" path that playback had postponed.
+    func mediaStoppedPlaying() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, UIApplication.shared.applicationState == .background,
+                  !self.isAsleep, self.pendingSleep == nil else { return }
+            self.appDidEnterBackground()
+        }
+    }
+
     @objc private func appDidEnterBackground() {
         guard isRunning else { return }
+        // A Tor tab is playing (or casting) audio/video: the audio background
+        // mode keeps the app running, and putting Tor to sleep would cut the
+        // stream. Sleep happens once playback stops.
+        if MediaPlayback.shared.keepsTorAwake {
+            AppLog.shared.log("Tor kept awake in background for media playback", category: "tor")
+            return
+        }
         enteredBackgroundAt = Date()
         // Keep Tor fully alive through quick app switches; only put it to
         // sleep shortly before iOS would suspend us anyway.

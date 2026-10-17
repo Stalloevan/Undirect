@@ -45,6 +45,10 @@ targets:
           NSAllowsArbitraryLoads: true
         # Downloads kept in Undirect show up in Files › On My iPhone › Undirect.
         UIFileSharingEnabled: true
+        # Web audio, AirPlay and Picture in Picture keep playing while you
+        # use other apps or lock the phone.
+        UIBackgroundModes:
+          - audio
         # Lets Files / the share sheet open HTML pages and web archives in Undirect.
         CFBundleDocumentTypes:
           - CFBundleTypeName: Web Page

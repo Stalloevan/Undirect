@@ -356,8 +356,13 @@ final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
     weak var owner: Tab?
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any] else { return }
-        owner?.handle(body)
+        guard let body = message.body as? [String: Any], let owner else { return }
+        if body["type"] as? String == "media" {
+            // Keep the exact frame: embedded players live in iframes.
+            MediaPlayback.shared.handle(body, frame: message.frameInfo, tab: owner)
+            return
+        }
+        owner.handle(body)
     }
 }
 
@@ -490,6 +495,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         userChainActive = false
+        MediaPlayback.shared.tabDidLeavePage(self)
         if let url = webView.url, url.scheme == "http" || url.scheme == "https" { lastKnownURL = url }
     }
 
