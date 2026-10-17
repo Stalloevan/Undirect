@@ -89,7 +89,7 @@ Requires iOS / iPadOS 17 or later. Undirect is sideloaded — it isn't on the Ap
 
 ## Installing
 
-Every tag push (`v*`) builds an **unsigned** `.ipa` with GitHub Actions and attaches it to the [Releases](../../releases) page. Install it with any sideloading tool that signs apps, for example:
+Changing the `VERSION` file on `main` (or pushing a `v*` tag) builds an **unsigned** `.ipa` with GitHub Actions, creates the matching `v` tag, and attaches the IPA to a new release on the [Releases](../../releases) page. Install it with any sideloading tool that signs apps, for example:
 
 - **Feather** with your own certificate, on the device.
 - **AltStore** or **SideStore** with a free Apple ID (re-sign every 7 days).
@@ -119,7 +119,8 @@ Project layout:
 | `Sources/Resources/` | Bundled blocklists and site-reputation lists |
 | `ShareExtension/` | The "Open in Undirect" share sheet extension |
 | `project.yml` | XcodeGen project definition |
-| `.github/workflows/build.yml` | CI that builds the unsigned IPA on tag pushes |
+| `VERSION` | The version to release; bumping it publishes a new release |
+| `.github/workflows/build.yml` | CI that builds the unsigned IPA and publishes releases |
 
 ## Credits
 
