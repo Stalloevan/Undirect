@@ -49,6 +49,9 @@ targets:
         # use other apps or lock the phone.
         UIBackgroundModes:
           - audio
+        # Cast with AirPlay relays video through the phone; the TV connects
+        # to it over your Wi-Fi.
+        NSLocalNetworkUsageDescription: "Undirect sends videos you cast to your AirPlay TV over your Wi-Fi network."
         # Lets Files / the share sheet open HTML pages and web archives in Undirect.
         CFBundleDocumentTypes:
           - CFBundleTypeName: Web Page

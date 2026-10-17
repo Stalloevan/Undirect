@@ -32,6 +32,11 @@ final class MediaPlayback {
     private var rate: Double = 1
     /// Tabs whose page has (or had) a video, so ⋯ can offer AirPlay.
     private var tabsWithVideo = NSHashTable<Tab>.weakObjects()
+    /// The frame a tab's video lives in (embedded players are in iframes).
+    private var videoFrames: [ObjectIdentifier: WKFrameInfo] = [:]
+    /// While the native cast player is up, the page's own media events
+    /// (we pause it) mustn't take over the lock screen.
+    var nativePlayerActive = false
     private var commandsRegistered = false
 
     private init() {}
@@ -49,8 +54,16 @@ final class MediaPlayback {
     }
 
     var keepsTorAwake: Bool {
+        if CastSession.current?.isTor == true { return true }
         guard let tab, tab.isTor else { return false }
         return state == .playing
+    }
+
+    /// Hands the lock screen over to the native cast player.
+    func yieldToNativePlayer() {
+        nativePlayerActive = true
+        clear()
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
     func hasVideo(_ tab: Tab) -> Bool { tabsWithVideo.contains(tab) || self.tab === tab }
@@ -59,8 +72,11 @@ final class MediaPlayback {
 
     func handle(_ body: [String: Any], frame: WKFrameInfo, tab: Tab) {
         guard let raw = body["state"] as? String else { return }
-        if (body["video"] as? Bool) == true { tabsWithVideo.add(tab) }
-        if raw == "present" { return }
+        if (body["video"] as? Bool) == true {
+            tabsWithVideo.add(tab)
+            videoFrames[ObjectIdentifier(tab)] = frame
+        }
+        if raw == "present" || nativePlayerActive { return }
         guard let newState = State(rawValue: raw) else { return }
 
         // Something else starting to play becomes the one we control.
@@ -81,7 +97,7 @@ final class MediaPlayback {
 
         let wireless = (body["wireless"] as? Bool) ?? false
         if wireless && !isCasting {
-            toast("Playing on AirPlay — you can leave Undirect or lock your phone")
+            toast("Playing on AirPlay. If the TV keeps loading, use ⋯ › Cast with AirPlay instead")
             AppLog.shared.log("AirPlay started on \(tab.host ?? "?")", category: "media")
         }
         isCasting = wireless
@@ -99,6 +115,7 @@ final class MediaPlayback {
     /// The tab loaded a different page or was closed: its media is gone.
     func tabDidLeavePage(_ tab: Tab) {
         tabsWithVideo.remove(tab)
+        videoFrames.removeValue(forKey: ObjectIdentifier(tab))
         guard self.tab === tab else { return }
         let wasPlaying = state == .playing
         clear()
@@ -211,7 +228,10 @@ final class MediaPlayback {
         }
         """
 
-    private static let castJS = unblockJS + """
+    /// Finds what the TV should play: the video's own address if it has a
+    /// real one, otherwise the stream a blob:/MediaSource player is reading
+    /// (from the page's network log — the playlist is fetched like any file).
+    private static let discoverJS = """
         var m = window.__undirectActiveMedia;
         if (!m || !m.isConnected) {
           var vids = Array.prototype.slice.call(document.querySelectorAll('video'));
@@ -219,32 +239,56 @@ final class MediaPlayback {
             var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
             return (rb.width * rb.height) - (ra.width * ra.height);
           });
-          m = vids[0];
+          m = vids[0] || null;
         }
-        if (!m) return 'none';
-        __undirectAllowAirPlay(m);
-        if (m.disableRemotePlayback || m.getAttribute('x-webkit-airplay') === 'deny') return 'phoneonly';
-        if (typeof m.webkitShowPlaybackTargetPicker !== 'function') return 'unsupported';
-        window.__undirectActiveMedia = m;
-        m.webkitShowPlaybackTargetPicker();
-        return 'ok';
+        var names = [];
+        try { names = performance.getEntriesByType('resource').map(function (e) { return e.name; }); } catch (e) {}
+        function first(re) { for (var i = 0; i < names.length; i++) if (re.test(names[i])) return names[i]; return null; }
+        var src = m ? (m.currentSrc || m.src || '') : '';
+        var url = null, kind = null;
+        if (/^https?:/i.test(src)) { url = src; kind = /m3u8/i.test(src) ? 'hls' : 'file'; }
+        // The earliest playlist is the master (it lists every quality).
+        if (!url) { url = first(/\\.m3u8(\\?|#|$)/i) || first(/m3u8/i); if (url) kind = 'hls'; }
+        if (!url) { url = first(/\\.(mp4|m4v|mov)(\\?|#|$)/i); if (url) kind = 'file'; }
+        var dash = !url && !!first(/\\.mpd(\\?|#|$)/i);
+        if (m && !m.paused) { try { m.pause(); } catch (e) {} }
+        return JSON.stringify({ url: url, kind: kind, dash: dash, hasVideo: !!m,
+                                time: m && isFinite(m.currentTime) ? m.currentTime : 0,
+                                ua: navigator.userAgent, page: location.href,
+                                title: (navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title) || document.title || '' });
         """
 
-    /// ⋯ › Cast with AirPlay: opens the AirPlay picker for the page's video.
+    /// ⋯ › Cast with AirPlay: plays the page's video in the native player,
+    /// relayed through the phone so the TV gets the same access the page has.
     func castCurrentVideo(in tab: Tab, from host: UIViewController) {
-        let targetFrame = self.tab === tab ? frame : nil
-        tab.webView.callAsyncJavaScript(Self.castJS, arguments: [:], in: targetFrame, in: .defaultClient) { [weak self, weak host] result in
-            let outcome = (try? result.get()) as? String
-            guard outcome != "ok", host != nil else { return }
-            switch outcome {
-            case "phoneonly":
-                self?.toast("This video is streamed in a way only the phone can play, so it can't be sent to a TV. Screen Mirroring from Control Center still works.")
-            case "none" where !(self?.hasVideo(tab) ?? false):
-                self?.toast("No video on this page to cast")
-            default:
-                // Usually a video inside an embedded player: the native
-                // player's own AirPlay button reaches it.
-                self?.toast("Play the video fullscreen, then tap its AirPlay button")
+        let key = ObjectIdentifier(tab)
+        let targetFrame = (self.tab === tab ? frame : nil) ?? videoFrames[key]
+        tab.webView.callAsyncJavaScript(Self.discoverJS, arguments: [:], in: targetFrame, in: .defaultClient) { [weak self, weak host, weak tab] result in
+            guard let self, let host, let tab else { return }
+            guard let json = (try? result.get()) as? String,
+                  let data = json.data(using: .utf8),
+                  let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self.toast("Couldn't read the video on this page")
+                return
+            }
+            guard let urlString = info["url"] as? String, let streamURL = URL(string: urlString) else {
+                if (info["dash"] as? Bool) == true {
+                    self.toast("This site streams in a format AirPlay can't play (DASH). Screen Mirroring from Control Center still works.")
+                } else if (info["hasVideo"] as? Bool) == true {
+                    self.toast("Couldn't find this video's stream. Start playing it, then try again.")
+                } else {
+                    self.toast("No video on this page to cast")
+                }
+                return
+            }
+            let page = (info["page"] as? String).flatMap(URL.init(string:)) ?? tab.webView.url
+            tab.webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+                let context = CastRelay.Context(cookies: cookies,
+                                                userAgent: (info["ua"] as? String) ?? "Mozilla/5.0",
+                                                referer: page, isTor: tab.isTor)
+                CastSession.start(stream: streamURL, context: context,
+                                  title: (info["title"] as? String) ?? tab.title,
+                                  startAt: (info["time"] as? Double) ?? 0, from: host)
             }
         }
     }
@@ -262,6 +306,9 @@ final class MediaPlayback {
         (function () {
           if (window.__undirectMediaOn) return;
           window.__undirectMediaOn = true;
+          // Room in the network log to find a player's stream later (the
+          // default 250 entries fill up with video segments).
+          try { performance.setResourceTimingBufferSize(3000); } catch (e) {}
           var NAME = '\(messageName)';
           function post(m) { try { window.webkit.messageHandlers[NAME].postMessage(m); } catch (e) {} }
           var active = null;

@@ -42,6 +42,7 @@ Requires iOS / iPadOS 17 or later. Undirect is sideloaded — it isn't on the Ap
 
 ### Video and audio
 - **AirPlay** to an Apple TV or AirPlay-compatible TV or speaker, from the video's own button or ⋯ › Cast with AirPlay. Keeps playing while you use other apps or lock your phone.
+- **Cast with AirPlay relays the video through your phone.** The TV fetches it from Undirect, which fetches it from the site with your tab's own cookies (and through Tor in Tor tabs). This works for sites that refuse requests from the TV, and for players that stream through `blob:` addresses. The phone and TV must be on the same Wi-Fi, and the phone stays involved for as long as you watch.
 - Background audio and Picture in Picture.
 - Lock-screen and Control Center controls (play/pause, skip 15 seconds, scrubbing).
 - Sites' own fullscreen players are supported.
@@ -83,7 +84,7 @@ Requires iOS / iPadOS 17 or later. Undirect is sideloaded — it isn't on the Ap
 - Only protects browsing inside Undirect; it doesn't change Safari.
 - No iCloud sync of tabs, history or passwords, and no browser extensions.
 - Password AutoFill works through the iOS keyboard, but not as smoothly as in Safari.
-- Videos protected with DRM, and some sites that disable casting, may not play over AirPlay.
+- Videos protected with DRM, and sites that stream in the DASH format, can't be cast; Screen Mirroring still works for those.
 
 ---
 

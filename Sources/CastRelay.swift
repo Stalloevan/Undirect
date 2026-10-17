@@ -1,0 +1,440 @@
+import Foundation
+import Network
+import WebKit
+import Security
+
+/// A tiny private HTTP server on the phone that lets an AirPlay TV play
+/// videos it couldn't fetch on its own.
+///
+/// When you AirPlay a web video, the TV downloads it itself. Many sites only
+/// serve video to the browser that loaded the page (they check its cookies,
+/// Referer, or a link signed for its IP address), and Tor tabs load over a
+/// different network address than the TV uses — so the TV shows the title and
+/// length, then spins forever.
+///
+/// With the relay, the TV asks the phone instead: each request is fetched
+/// from the site with the tab's own cookies, user agent and Referer (through
+/// Tor for Tor tabs) and streamed back. HLS playlists are rewritten so every
+/// segment and key goes through the relay too.
+///
+/// Only runs while something is being cast. Every URL carries a random
+/// secret, so nothing else on the network can use it as a proxy, and it only
+/// serves addresses it handed out itself.
+final class CastRelay {
+    static let shared = CastRelay()
+
+    struct Context {
+        var cookies: [HTTPCookie]
+        var userAgent: String
+        var referer: URL?
+        var isTor: Bool
+    }
+
+    enum RelayError: LocalizedError {
+        case noWiFi, couldNotStart
+        var errorDescription: String? {
+            switch self {
+            case .noWiFi: return "Connect to the same Wi-Fi network as your TV to cast this video."
+            case .couldNotStart: return "Couldn't start streaming to the TV."
+            }
+        }
+    }
+
+    private let queue = DispatchQueue(label: "undirect.castrelay")
+    private var listener: NWListener?
+    private var session: URLSession?
+    private var context: Context?
+    private var token = ""
+    private var host = ""
+    private var port: UInt16 = 0
+    private var routes: [String: URL] = [:]
+    private var routeIDs: [String: String] = [:]
+    private var activeTasks: [ObjectIdentifier: RelayTask] = [:]
+    private var loggedFailure = false
+
+    private init() {}
+
+    var isRunning: Bool { queue.sync { listener != nil } }
+
+    // MARK: Lifecycle
+
+    /// Starts (or restarts) the relay for one cast and returns the relay
+    /// address for `upstream`. Calls back on the main queue.
+    func start(upstream: URL, context: Context, completion: @escaping (Result<URL, Error>) -> Void) {
+        queue.async {
+            self.stopLocked()
+            guard let address = Self.wifiAddress() else {
+                DispatchQueue.main.async { completion(.failure(RelayError.noWiFi)) }
+                return
+            }
+            self.host = address
+            self.context = context
+            self.token = Self.randomHex(16)
+            self.loggedFailure = false
+
+            let config = URLSessionConfiguration.ephemeral
+            config.requestCachePolicy = .reloadIgnoringLocalCacheData
+            config.httpShouldSetCookies = false
+            config.httpCookieAcceptPolicy = .never
+            config.timeoutIntervalForRequest = 30
+            config.httpMaximumConnectionsPerHost = 8
+            if context.isTor, let torPort = NWEndpoint.Port(rawValue: TorManager.shared.socksPort) {
+                let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host("127.0.0.1"), port: torPort)
+                config.proxyConfigurations = [ProxyConfiguration(socksv5Proxy: endpoint)]
+            }
+            let delegateQueue = OperationQueue()
+            delegateQueue.underlyingQueue = self.queue
+            delegateQueue.maxConcurrentOperationCount = 1
+            self.session = URLSession(configuration: config, delegate: nil, delegateQueue: delegateQueue)
+
+            do {
+                let params = NWParameters.tcp
+                params.allowLocalEndpointReuse = true
+                let listener = try NWListener(using: params)
+                self.listener = listener
+                var finished = false
+                listener.stateUpdateHandler = { [weak self] state in
+                    guard let self, !finished else { return }
+                    switch state {
+                    case .ready:
+                        finished = true
+                        self.port = listener.port?.rawValue ?? 0
+                        let url = self.register(upstream)
+                        AppLog.shared.log("Cast relay ready on \(self.host):\(self.port)\(context.isTor ? " (via Tor)" : "")", category: "media")
+                        DispatchQueue.main.async { completion(.success(url)) }
+                    case .failed(let error):
+                        finished = true
+                        AppLog.shared.log("Cast relay failed to start: \(error)", category: "media")
+                        self.stopLocked()
+                        DispatchQueue.main.async { completion(.failure(RelayError.couldNotStart)) }
+                    default:
+                        break
+                    }
+                }
+                listener.newConnectionHandler = { [weak self] connection in
+                    self?.accept(connection)
+                }
+                listener.start(queue: self.queue)
+            } catch {
+                self.stopLocked()
+                DispatchQueue.main.async { completion(.failure(RelayError.couldNotStart)) }
+            }
+        }
+    }
+
+    func stop() {
+        queue.async { self.stopLocked() }
+    }
+
+    private func stopLocked() {
+        guard listener != nil || session != nil else { return }
+        listener?.cancel()
+        listener = nil
+        for task in activeTasks.values { task.cancel() }
+        activeTasks.removeAll()
+        session?.invalidateAndCancel()
+        session = nil
+        routes.removeAll()
+        routeIDs.removeAll()
+        context = nil
+        AppLog.shared.log("Cast relay stopped", category: "media")
+    }
+
+    // MARK: Routes
+
+    /// A relay address for an upstream URL (same upstream, same address).
+    private func register(_ upstream: URL) -> URL {
+        let key = upstream.absoluteString
+        let id: String
+        if let existing = routeIDs[key] {
+            id = existing
+        } else {
+            id = Self.randomHex(8)
+            routeIDs[key] = id
+            routes[id] = upstream
+        }
+        // Keep the extension so the player can tell a playlist from a segment.
+        var ext = upstream.pathExtension.lowercased()
+        if ext.isEmpty || ext.count > 5 {
+            ext = key.lowercased().contains("m3u8") ? "m3u8" : "bin"
+        }
+        return URL(string: "http://\(host):\(port)/\(token)/\(id).\(ext)")!
+    }
+
+    // MARK: HTTP
+
+    private func accept(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        readRequest(on: connection, buffer: Data())
+    }
+
+    private func readRequest(on connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+            guard let self else { connection.cancel(); return }
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self)
+                self.respond(to: head, on: connection)
+            } else if isComplete || error != nil || buffer.count > 32_768 {
+                connection.cancel()
+            } else {
+                self.readRequest(on: connection, buffer: buffer)
+            }
+        }
+    }
+
+    private func respond(to head: String, on connection: NWConnection) {
+        let lines = head.components(separatedBy: "\r\n")
+        let parts = (lines.first ?? "").split(separator: " ")
+        guard parts.count >= 2 else { return Self.sendStatus(400, on: connection) }
+        let method = String(parts[0]).uppercased()
+        guard method == "GET" || method == "HEAD" else { return Self.sendStatus(405, on: connection) }
+
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        }
+
+        let path = String(parts[1]).split(separator: "?").first.map(String.init) ?? ""
+        let comps = path.split(separator: "/").map(String.init)
+        guard comps.count == 2, comps[0] == token, let context,
+              let id = comps[1].split(separator: ".").first.map(String.init),
+              let upstream = routes[id], let session else {
+            return Self.sendStatus(404, on: connection)
+        }
+
+        var request = URLRequest(url: upstream)
+        request.httpMethod = method
+        request.setValue(context.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        if let referer = context.referer {
+            request.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
+            if let scheme = referer.scheme, let refHost = referer.host {
+                let origin = "\(scheme)://\(refHost)" + (referer.port.map { ":\($0)" } ?? "")
+                // Only cross-site fetches carry Origin, as in the browser.
+                if refHost.lowercased() != upstream.host?.lowercased() {
+                    request.setValue(origin, forHTTPHeaderField: "Origin")
+                }
+            }
+        }
+        if let range = headers["range"] { request.setValue(range, forHTTPHeaderField: "Range") }
+        let cookies = Self.cookies(context.cookies, for: upstream)
+        for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+
+        let task = session.dataTask(with: request)
+        let relayTask = RelayTask(task: task, connection: connection, isHead: method == "HEAD", relay: self)
+        task.delegate = relayTask
+        activeTasks[ObjectIdentifier(relayTask)] = relayTask
+        connection.stateUpdateHandler = { [weak relayTask] state in
+            switch state {
+            case .failed, .cancelled: relayTask?.cancel()
+            default: break
+            }
+        }
+        task.resume()
+    }
+
+    fileprivate func finished(_ task: RelayTask) {
+        activeTasks.removeValue(forKey: ObjectIdentifier(task))
+    }
+
+    fileprivate func logUpstreamFailure(_ message: String) {
+        guard !loggedFailure else { return }
+        loggedFailure = true
+        AppLog.shared.log("Cast relay: \(message)", category: "media")
+    }
+
+    /// Rewrites every URI in an HLS playlist (variants, segments, keys,
+    /// subtitle/audio renditions) to go through the relay.
+    fileprivate func rewritePlaylist(_ text: String, base: URL) -> String {
+        let uriAttribute = try? NSRegularExpression(pattern: "URI=\"([^\"]+)\"")
+        var out: [String] = []
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                out.append(line)
+            } else if trimmed.hasPrefix("#") {
+                guard let regex = uriAttribute else { out.append(line); continue }
+                let ns = line as NSString
+                var result = line
+                for match in regex.matches(in: line, range: NSRange(location: 0, length: ns.length)).reversed() {
+                    let raw = ns.substring(with: match.range(at: 1))
+                    guard let absolute = URL(string: raw, relativeTo: base)?.absoluteURL,
+                          ["http", "https"].contains(absolute.scheme?.lowercased() ?? "") else { continue }
+                    let relayed = register(absolute).absoluteString
+                    result = (result as NSString).replacingCharacters(in: match.range(at: 1), with: relayed)
+                }
+                out.append(result)
+            } else if let absolute = URL(string: trimmed, relativeTo: base)?.absoluteURL,
+                      ["http", "https"].contains(absolute.scheme?.lowercased() ?? "") {
+                out.append(register(absolute).absoluteString)
+            } else {
+                out.append(line)
+            }
+        }
+        return out.joined(separator: "\n")
+    }
+
+    // MARK: Helpers
+
+    static func sendStatus(_ code: Int, on connection: NWConnection) {
+        let head = "HTTP/1.1 \(code) \(HTTPURLResponse.localizedString(forStatusCode: code).capitalized)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        connection.send(content: Data(head.utf8), contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    private static func cookies(_ all: [HTTPCookie], for url: URL) -> [HTTPCookie] {
+        guard let host = url.host?.lowercased() else { return [] }
+        let secure = url.scheme?.lowercased() == "https"
+        let path = url.path.isEmpty ? "/" : url.path
+        return all.filter { cookie in
+            if cookie.isSecure && !secure { return false }
+            if let expires = cookie.expiresDate, expires < Date() { return false }
+            var domain = cookie.domain.lowercased()
+            if domain.hasPrefix(".") { domain.removeFirst() }
+            guard host == domain || host.hasSuffix("." + domain) else { return false }
+            return path.hasPrefix(cookie.path)
+        }
+    }
+
+    private static func randomHex(_ bytes: Int) -> String {
+        var data = [UInt8](repeating: 0, count: bytes)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes, &data)
+        return data.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The phone's Wi-Fi IPv4 address — what the TV connects to.
+    static func wifiAddress() -> String? {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        var fallback: String?
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let iface = ptr.pointee
+            guard let addr = iface.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET),
+                  (iface.ifa_flags & UInt32(IFF_UP)) != 0, (iface.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
+            var name = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len), &name, socklen_t(name.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let ip = String(cString: name)
+            let ifName = String(cString: iface.ifa_name)
+            if ifName == "en0" { return ip }
+            // Personal Hotspot / other wired-style interfaces.
+            if ifName.hasPrefix("en") || ifName.hasPrefix("bridge") { fallback = fallback ?? ip }
+        }
+        return fallback
+    }
+}
+
+/// One relayed request: streams the site's response back to the TV, with
+/// back-pressure so a slow TV doesn't make the phone buffer the whole video.
+private final class RelayTask: NSObject, URLSessionDataDelegate {
+    private let task: URLSessionDataTask
+    private let connection: NWConnection
+    private let isHead: Bool
+    private weak var relay: CastRelay?
+    private var isPlaylist = false
+    private var playlistData = Data()
+    private var headersSent = false
+    private var pendingBytes = 0
+    private var suspended = false
+    private var done = false
+
+    init(task: URLSessionDataTask, connection: NWConnection, isHead: Bool, relay: CastRelay) {
+        self.task = task
+        self.connection = connection
+        self.isHead = isHead
+        self.relay = relay
+    }
+
+    func cancel() {
+        guard !done else { return }
+        done = true
+        task.cancel()
+        connection.cancel()
+        relay?.finished(self)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse else { completionHandler(.cancel); return }
+        let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        let path = (http.url?.path ?? "").lowercased()
+        isPlaylist = type.contains("mpegurl") || path.hasSuffix(".m3u8")
+        if http.statusCode >= 400 {
+            relay?.logUpstreamFailure("site answered \(http.statusCode) for \(http.url?.host ?? "?")")
+        }
+        if !isPlaylist {
+            var head = "HTTP/1.1 \(http.statusCode) OK\r\n"
+            if !type.isEmpty { head += "Content-Type: \(type)\r\n" }
+            // URLSession decodes compressed bodies, so the original length
+            // only holds when the body wasn't encoded.
+            if http.value(forHTTPHeaderField: "Content-Encoding") == nil, http.expectedContentLength >= 0 {
+                head += "Content-Length: \(http.expectedContentLength)\r\n"
+            }
+            if let range = http.value(forHTTPHeaderField: "Content-Range") { head += "Content-Range: \(range)\r\n" }
+            head += "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+            send(Data(head.utf8))
+            headersSent = true
+            if isHead { completionHandler(.cancel); finish(); return }
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if isPlaylist {
+            playlistData.append(data)
+            return
+        }
+        send(data)
+        if pendingBytes > 4_000_000 && !suspended {
+            suspended = true
+            task.suspend()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !done else { return }
+        if let error, !headersSent {
+            relay?.logUpstreamFailure("couldn't reach the site: \(error.localizedDescription)")
+            CastRelay.sendStatus(502, on: connection)
+            done = true
+            relay?.finished(self)
+            return
+        }
+        if isPlaylist, !headersSent {
+            let base = task.response?.url ?? task.originalRequest?.url ?? URL(string: "about:blank")!
+            let text = String(decoding: playlistData, as: UTF8.self)
+            let body = Data((relay?.rewritePlaylist(text, base: base) ?? text).utf8)
+            let status = (task.response as? HTTPURLResponse)?.statusCode ?? 200
+            let head = "HTTP/1.1 \(status) OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: \(body.count)\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+            send(Data(head.utf8))
+            headersSent = true
+            if !isHead { send(body) }
+        }
+        finish()
+    }
+
+    private func send(_ data: Data) {
+        pendingBytes += data.count
+        connection.send(content: data, completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            self.pendingBytes -= data.count
+            if self.suspended && self.pendingBytes < 1_000_000 && !self.done {
+                self.suspended = false
+                self.task.resume()
+            }
+        })
+    }
+
+    private func finish() {
+        guard !done else { return }
+        done = true
+        connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { [connection] _ in connection.cancel() })
+        relay?.finished(self)
+    }
+}
