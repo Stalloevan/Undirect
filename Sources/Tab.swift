@@ -490,6 +490,21 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        // A Cloudflare challenge page: it can't pass while the fingerprint
+        // shield is rewriting browser properties, and the page is already
+        // loading by the time anything in it could tell us. Cloudflare marks
+        // these responses with a header, so note the site, drop the shield
+        // for it, and load it again once.
+        if Settings.shared.cloudflareFriendly, navigationResponse.isForMainFrame,
+           let http = navigationResponse.response as? HTTPURLResponse,
+           (http.value(forHTTPHeaderField: "cf-mitigated") ?? "").lowercased() == "challenge",
+           let url = http.url, let host = url.host, CloudflareExemptions.add(host) {
+            AppLog.shared.log("Cloudflare check on \(host): shield off for this site, reloading", category: "privacy")
+            reinstallScripts()
+            decisionHandler(.cancel)
+            load(url)
+            return
+        }
         decisionHandler(DownloadManager.shouldDownload(navigationResponse) ? .download : .allow)
     }
 

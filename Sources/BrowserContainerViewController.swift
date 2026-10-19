@@ -38,6 +38,7 @@ final class BrowserContainerViewController: UIViewController {
     private let addressGradient = CAGradientLayer()
     private var sidebarWidth: NSLayoutConstraint!
     private let pulloutHandle = PulloutHandleView()
+    private var pulloutTop: NSLayoutConstraint!
     private var pulloutLeading: NSLayoutConstraint!
     private var pulloutTrailing: NSLayoutConstraint!
     private let contentView = UIView()
@@ -176,6 +177,7 @@ final class BrowserContainerViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        syncPulloutPosition()
         Theme.applyBlockShadow(to: fieldBackground)
         // Gradient reaches a little above the bar so the page fades into it.
         let fade: CGFloat = 28
@@ -367,10 +369,11 @@ final class BrowserContainerViewController: UIViewController {
         ])
 
         NSLayoutConstraint.activate([
-            pulloutHandle.topAnchor.constraint(equalTo: safe.topAnchor, constant: 70),
-            pulloutHandle.widthAnchor.constraint(equalToConstant: 40),
-            pulloutHandle.heightAnchor.constraint(equalToConstant: 44)
+            pulloutHandle.widthAnchor.constraint(equalToConstant: TabSidebarView.minimalWidth),
+            pulloutHandle.heightAnchor.constraint(equalToConstant: TabSidebarView.rowHeight)
         ])
+        pulloutTop = pulloutHandle.topAnchor.constraint(equalTo: safe.topAnchor, constant: TabSidebarView.listTop)
+        pulloutTop.isActive = true
         pulloutLeading = pulloutHandle.leadingAnchor.constraint(equalTo: view.leadingAnchor)
         pulloutTrailing = pulloutHandle.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         pulloutHandle.onActivate = { [weak self] in
@@ -404,17 +407,11 @@ final class BrowserContainerViewController: UIViewController {
         NSLayoutConstraint.deactivate([sidebarLeading, sidebarTrailing, contentLeadingFromSidebar,
                                        contentLeadingFromSafe, contentTrailingFromSidebar, contentTrailingFromSafe,
                                        pulloutLeading, pulloutTrailing])
-        // The page content always spans the full safe width, so the web view
-        // stays in exactly the same place whether the tab bar is hidden,
-        // minimal or full — the sidebar overlays it like a drawer instead of
-        // pushing it aside.
-        NSLayoutConstraint.activate([contentLeadingFromSafe, contentTrailingFromSafe])
         if position == .leading {
-            NSLayoutConstraint.activate([sidebarLeading, pulloutLeading])
+            NSLayoutConstraint.activate([sidebarLeading, contentLeadingFromSidebar, contentTrailingFromSafe, pulloutLeading])
         } else {
-            NSLayoutConstraint.activate([sidebarTrailing, pulloutTrailing])
+            NSLayoutConstraint.activate([sidebarTrailing, contentTrailingFromSidebar, contentLeadingFromSafe, pulloutTrailing])
         }
-        view.bringSubviewToFront(sidebar)
         view.bringSubviewToFront(pulloutHandle)
         pulloutHandle.setEdge(position)
     }
@@ -906,6 +903,15 @@ final class BrowserContainerViewController: UIViewController {
         if let tab = currentTab {
             pulloutHandle.configure(icon: tab.icon, isTor: tab.isTor, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
         }
+        syncPulloutPosition()
+    }
+
+    /// Keeps the hidden-state handle exactly where the current tab's icon sits
+    /// in the minimal and full bars, so the icon never jumps between states.
+    private func syncPulloutPosition() {
+        guard pulloutTop != nil else { return }
+        let top = sidebar.selectedRowTop()
+        if pulloutTop.constant != top { pulloutTop.constant = top }
     }
 
     @objc private func stacksChanged() {
@@ -1850,8 +1856,8 @@ final class PulloutHandleView: UIView {
         NSLayoutConstraint.activate([
             iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 32),
-            iconView.heightAnchor.constraint(equalToConstant: 32),
+            iconView.widthAnchor.constraint(equalToConstant: 38),
+            iconView.heightAnchor.constraint(equalToConstant: 38),
             torBadge.trailingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 3),
             torBadge.bottomAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 3),
             torBadge.widthAnchor.constraint(equalToConstant: 14),

@@ -42,6 +42,9 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
 
     static let minimalWidth: CGFloat = 52
     static let fullWidth: CGFloat = 250
+    static let rowHeight: CGFloat = 48
+    /// Where the tab list starts: toggle (4 + 34), overview button (34), gap (2).
+    static let listTop: CGFloat = 74
 
     weak var delegate: TabSidebarDelegate?
     private(set) var mode: SidebarDisplayMode = .minimal
@@ -73,7 +76,7 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
         tableView.showsVerticalScrollIndicator = false
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.rowHeight = 48
+        tableView.rowHeight = Self.rowHeight
         tableView.register(TabCell.self, forCellReuseIdentifier: "tab")
         tableView.register(AddTabCell.self, forCellReuseIdentifier: "add")
         tableView.register(StackHeaderCell.self, forCellReuseIdentifier: "stack")
@@ -125,6 +128,21 @@ final class TabSidebarView: UIView, UITableViewDataSource, UITableViewDelegate {
     func update(items: [SidebarItem]) {
         self.items = items
         layoutRows()
+    }
+
+    /// Top edge (from the top of the sidebar) of the current tab's row, kept
+    /// inside the visible part of the list. The hidden-state handle uses this
+    /// so its icon lands exactly where the tab's own icon is in the bar.
+    func selectedRowTop() -> CGFloat {
+        var rowIndex = 0
+        if let sel = selectedTabIndex {
+            if let r = rows.firstIndex(of: .tab(sel)) { rowIndex = r }
+            else if let sid = items[sel].stackID, let r = rows.firstIndex(of: .stackHeader(sid)) { rowIndex = r }
+        }
+        var y = Self.listTop + CGFloat(rowIndex) * Self.rowHeight - tableView.contentOffset.y
+        y = max(Self.listTop, y)
+        if bounds.height > Self.listTop + Self.rowHeight { y = min(y, bounds.height - Self.rowHeight) }
+        return y
     }
 
     private func layoutRows() {

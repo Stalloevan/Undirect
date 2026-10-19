@@ -1,5 +1,33 @@
 import WebKit
 
+/// Sites that served a Cloudflare challenge page. The fingerprint shield stays
+/// off for them, because the challenge reads the very properties the shield
+/// rewrites and otherwise never lets the visit through.
+enum CloudflareExemptions {
+    private static let key = "s.cloudflareExemptHosts"
+    private(set) static var hosts: Set<String> = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+
+    static func contains(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return hosts.contains(host)
+    }
+
+    /// True if the host was newly added.
+    @discardableResult
+    static func add(_ host: String) -> Bool {
+        let host = host.lowercased()
+        guard !host.isEmpty, hosts.insert(host).inserted else { return false }
+        if hosts.count > 300 { hosts = Set(hosts.sorted().suffix(300)) }
+        UserDefaults.standard.set(Array(hosts), forKey: key)
+        return true
+    }
+
+    static var scriptList: String {
+        let data = (try? JSONSerialization.data(withJSONObject: hosts.sorted())) ?? Data("[]".utf8)
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+}
+
 enum WebEngine {
 
     static func makeConfiguration(tor: Bool) -> WKWebViewConfiguration {
@@ -27,15 +55,21 @@ enum WebEngine {
         let s = Settings.shared
         let flags = [s.autoHandleCookieBanners, s.blockWebRTC, s.sendGPC, s.fingerprintProtection,
                      s.cloudflareFriendly, s.skipVideoAds]
-        return flags.map { $0 ? "1" : "0" }.joined() + "|" + s.appTheme.rawValue
+        return flags.map { $0 ? "1" : "0" }.joined() + "|" + s.appTheme.rawValue + "|cf\(CloudflareExemptions.hosts.count)"
     }
 
     /// Installs every Undirect script on a (non-popup) tab's content controller.
     /// Our scripts run in an isolated content world so pages can't see or tamper with them.
     static func installScripts(on controller: WKUserContentController, messageName: String, tor: Bool) {
         let world = WKContentWorld.defaultClient
+        // Cloudflare's challenge frame checks the page for tampering, so none
+        // of our scripts run inside it.
+        let cf = Settings.shared.cloudflareFriendly
         func add(_ source: String, mainFrameOnly: Bool, world: WKContentWorld) {
-            controller.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart,
+            let body = (cf && !mainFrameOnly)
+                ? "(function(){ if (/(^|\\.)challenges\\.cloudflare\\.com$/.test(location.hostname)) return;\n" + source + "\n})();"
+                : source
+            controller.addUserScript(WKUserScript(source: body, injectionTime: .atDocumentStart,
                                                   forMainFrameOnly: mainFrameOnly, in: world))
         }
         add(viewportFallbackScript, mainFrameOnly: false, world: world)
@@ -80,15 +114,15 @@ enum WebEngine {
         (function () {
           var CFG = { webrtc: \(webrtc), gpc: \(gpc), fp: \(fingerprint), tor: \(tor), cf: \(cfFriendly) };
           // Cloudflare's "verify you are human" check (Turnstile) reads the
-          // very properties the fingerprint shield rewrites, so it loops
-          // forever with the shield on. Step aside on the challenge itself
-          // (its own iframe host) and on a page actively showing one.
+          // very properties the fingerprint shield rewrites, so it never lets
+          // the visit through with the shield on. Step aside inside the
+          // challenge frame, and on any site that has served a challenge
+          // (the app notes those from the response header and reloads once).
           if (CFG.cf) {
             try {
               var h = (location.hostname || '').toLowerCase();
               if (h === 'challenges.cloudflare.com' || h.indexOf('.challenges.cloudflare.com') !== -1) return;
-              if (document.getElementById('challenge-form') || document.getElementById('cf-challenge-running') ||
-                  document.querySelector('[class*="cf-turnstile"], [id*="cf-chl"], script[src*="challenges.cloudflare.com"]')) return;
+              if (\(CloudflareExemptions.scriptList).indexOf(h) !== -1) return;
             } catch (e) {}
           }
           if (window.__undirectShield) return;
