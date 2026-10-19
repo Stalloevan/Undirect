@@ -109,6 +109,7 @@ final class BrowserContainerViewController: UIViewController {
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(recorderChanged), name: AutomationRecorder.didChange, object: nil)
         nc.addObserver(self, selector: #selector(tabFinishedLoading(_:)), name: Tab.didFinishPageLoad, object: nil)
+        nc.addObserver(self, selector: #selector(stacksChanged), name: TabStackStore.didChange, object: nil)
         nc.addObserver(self, selector: #selector(handleOpenLocalFile(_:)), name: LocalFiles.openNotification, object: nil)
         nc.addObserver(self, selector: #selector(rulesUpdated), name: ContentBlocker.didUpdate, object: nil)
         nc.addObserver(self, selector: #selector(rulesUpdated), name: DomainSetStore.didChange, object: nil)
@@ -403,11 +404,18 @@ final class BrowserContainerViewController: UIViewController {
         NSLayoutConstraint.deactivate([sidebarLeading, sidebarTrailing, contentLeadingFromSidebar,
                                        contentLeadingFromSafe, contentTrailingFromSidebar, contentTrailingFromSafe,
                                        pulloutLeading, pulloutTrailing])
+        // The page content always spans the full safe width, so the web view
+        // stays in exactly the same place whether the tab bar is hidden,
+        // minimal or full — the sidebar overlays it like a drawer instead of
+        // pushing it aside.
+        NSLayoutConstraint.activate([contentLeadingFromSafe, contentTrailingFromSafe])
         if position == .leading {
-            NSLayoutConstraint.activate([sidebarLeading, contentLeadingFromSidebar, contentTrailingFromSafe, pulloutLeading])
+            NSLayoutConstraint.activate([sidebarLeading, pulloutLeading])
         } else {
-            NSLayoutConstraint.activate([sidebarTrailing, contentTrailingFromSidebar, contentLeadingFromSafe, pulloutTrailing])
+            NSLayoutConstraint.activate([sidebarTrailing, pulloutTrailing])
         }
+        view.bringSubviewToFront(sidebar)
+        view.bringSubviewToFront(pulloutHandle)
         pulloutHandle.setEdge(position)
     }
 
@@ -670,6 +678,7 @@ final class BrowserContainerViewController: UIViewController {
             for saved in session.tabs {
                 let isTor = saved.tor ?? false
                 let tab = makeTab(tor: isTor, id: saved.id)
+                tab.stackID = saved.stack.flatMap(UUID.init(uuidString:))
                 if !isTor, let state = saved.state, saved.url != nil {
                     tab.restore(interactionState: state)
                 } else if let s = saved.url, let url = URL(string: s) {
@@ -796,6 +805,11 @@ final class BrowserContainerViewController: UIViewController {
         if Settings.shared.cookieCleanup == .onBackground {
             CookieGuard.shared.cleanUp(activeHosts: tabs.compactMap { $0.isTor ? nil : $0.host })
         }
+        // iOS 27 reclaims memory from backgrounded apps more aggressively;
+        // shedding background tabs' snapshot caches up front lowers the
+        // footprint so the app is less likely to be jettisoned (and its tabs
+        // restored from scratch) while away.
+        for tab in tabs where tab !== currentTab { tab.dropCaches() }
     }
 
     // MARK: Chrome updates
@@ -877,12 +891,13 @@ final class BrowserContainerViewController: UIViewController {
     private func refreshSidebar() {
         let items = tabs.enumerated().map { index, tab in
             SidebarItem(icon: tab.icon, title: tab.title, isTor: tab.isTor,
-                        isSelected: index == selectedIndex, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
+                        isSelected: index == selectedIndex, isLoading: tab.webView.isLoading || tab.isWaitingForTor,
+                        stackID: tab.stackID)
         }
         // Skip the table reload entirely when nothing visible changed (the
         // common case during a page load: only progress moved).
         let signature = items.map {
-            "\(ObjectIdentifier($0.icon).hashValue)|\($0.title)|\($0.isTor)|\($0.isSelected)|\($0.isLoading)"
+            "\(ObjectIdentifier($0.icon).hashValue)|\($0.title)|\($0.isTor)|\($0.isSelected)|\($0.isLoading)|\($0.stackID?.uuidString ?? "")|\($0.stackID.map { TabStackStore.shared.isCollapsed($0) ? "c" : "e" } ?? "")"
         } + ["\(sidebarState)"]
         if signature != lastSidebarSignature {
             lastSidebarSignature = signature
@@ -891,6 +906,11 @@ final class BrowserContainerViewController: UIViewController {
         if let tab = currentTab {
             pulloutHandle.configure(icon: tab.icon, isTor: tab.isTor, isLoading: tab.webView.isLoading || tab.isWaitingForTor)
         }
+    }
+
+    @objc private func stacksChanged() {
+        lastSidebarSignature = []
+        refreshSidebar()
     }
 
     @objc private func rulesUpdated() {
@@ -1282,6 +1302,8 @@ final class BrowserContainerViewController: UIViewController {
             })
         }
 
+        actions.append(tabStackSubmenu(for: tab))
+
         actions.append(UIAction(title: "Close Tab", image: Theme.icon("xmark"), attributes: .destructive) { [weak self] _ in
             self?.close(tab: tab)
         })
@@ -1291,6 +1313,151 @@ final class BrowserContainerViewController: UIViewController {
             })
         }
         return UIMenu(children: actions)
+    }
+
+    // MARK: Tab stacks
+
+    /// The "Tab Stack ▸" submenu for one tab: new stack, add to an existing
+    /// stack, or leave the current one.
+    private func tabStackSubmenu(for tab: Tab) -> UIMenu {
+        var children: [UIMenuElement] = []
+        children.append(UIAction(title: "New Stack", image: Theme.icon("plus.rectangle.on.rectangle")) { [weak self] _ in
+            self?.createStack(with: tab)
+        })
+        // Other stacks this tab could join.
+        let otherStacks = orderedStackIDs().filter { $0 != tab.stackID }
+        for sid in otherStacks {
+            children.append(UIAction(title: "Add to “\(TabStackStore.shared.name(sid))”", image: Theme.icon("rectangle.stack")) { [weak self] _ in
+                self?.addTab(tab, toStack: sid)
+            })
+        }
+        if tab.stackID != nil {
+            children.append(UIAction(title: "Remove from Stack", image: Theme.icon("rectangle.stack.badge.minus"), attributes: .destructive) { [weak self] _ in
+                self?.removeFromStack(tab)
+            })
+        }
+        return UIMenu(title: "Tab Stack", image: Theme.icon("rectangle.stack"), children: children)
+    }
+
+    /// Context menu for a stack header (rename, collapse/expand, ungroup).
+    private func stackMenu(for stackID: UUID) -> UIMenu {
+        let collapsed = TabStackStore.shared.isCollapsed(stackID)
+        return UIMenu(children: [
+            UIAction(title: "Rename Stack", image: Theme.icon("pencil")) { [weak self] _ in
+                self?.renameStack(stackID)
+            },
+            UIAction(title: collapsed ? "Expand" : "Collapse",
+                     image: Theme.icon(collapsed ? "chevron.down" : "chevron.right")) { _ in
+                TabStackStore.shared.toggleCollapsed(stackID)
+            },
+            UIAction(title: "New Tab in Stack", image: Theme.icon("plus")) { [weak self] _ in
+                self?.newTabInStack(stackID)
+            },
+            UIAction(title: "Ungroup Stack", image: Theme.icon("rectangle.stack.badge.minus"), attributes: .destructive) { [weak self] _ in
+                self?.ungroupStack(stackID)
+            }
+        ])
+    }
+
+    /// Stack IDs in the order their first member appears.
+    private func orderedStackIDs() -> [UUID] {
+        var seen: [UUID] = []
+        for tab in tabs {
+            if let sid = tab.stackID, !seen.contains(sid) { seen.append(sid) }
+        }
+        return seen
+    }
+
+    /// Moves `tab` so it sits with the rest of its stack (members stay
+    /// contiguous, which the sidebar's grouping relies on).
+    private func regroup(_ tab: Tab, into stackID: UUID) {
+        guard let from = tabs.firstIndex(where: { $0 === tab }) else { return }
+        let selectedTab = tabs.indices.contains(selectedIndex) ? tabs[selectedIndex] : nil
+        tabs.remove(at: from)
+        // Insert right after the last existing member of the stack, else append.
+        let lastMember = tabs.lastIndex { $0.stackID == stackID }
+        let insertAt = lastMember.map { $0 + 1 } ?? tabs.count
+        tabs.insert(tab, at: min(insertAt, tabs.count))
+        if let selectedTab, let i = tabs.firstIndex(where: { $0 === selectedTab }) { selectedIndex = i }
+        selectedIndex = min(max(0, selectedIndex), max(0, tabs.count - 1))
+    }
+
+    private func createStack(with tab: Tab) {
+        let sid = UUID()
+        tab.stackID = sid
+        TabStackStore.shared.setName("New Stack", for: sid)
+        regroup(tab, into: sid)
+        persist()
+        refreshSidebar()
+        renameStack(sid)
+    }
+
+    private func addTab(_ tab: Tab, toStack stackID: UUID) {
+        tab.stackID = stackID
+        regroup(tab, into: stackID)
+        persist()
+        refreshSidebar()
+    }
+
+    private func removeFromStack(_ tab: Tab) {
+        let sid = tab.stackID
+        tab.stackID = nil
+        if let sid, !tabs.contains(where: { $0.stackID == sid }) { TabStackStore.shared.forget(sid) }
+        persist()
+        refreshSidebar()
+    }
+
+    private func ungroupStack(_ stackID: UUID) {
+        for tab in tabs where tab.stackID == stackID { tab.stackID = nil }
+        TabStackStore.shared.forget(stackID)
+        persist()
+        refreshSidebar()
+    }
+
+    private func newTabInStack(_ stackID: UUID) {
+        TabStackStore.shared.setCollapsed(false, for: stackID)
+        let tab = makeTab(tor: Settings.shared.torForNewTabs)
+        tab.stackID = stackID
+        let lastMember = tabs.lastIndex { $0.stackID == stackID }
+        let insertAt = lastMember.map { $0 + 1 } ?? tabs.count
+        tabs.insert(tab, at: min(insertAt, tabs.count))
+        selectedIndex = min(insertAt, tabs.count - 1)
+        showCurrentTab()
+        addressField.becomeFirstResponder()
+        persist()
+        refreshSidebar()
+    }
+
+    private func renameStack(_ stackID: UUID) {
+        let alert = UIAlertController(title: "Stack Name", message: nil, preferredStyle: .alert)
+        alert.addTextField { $0.text = TabStackStore.shared.name(stackID); $0.clearButtonMode = .whileEditing }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak alert] _ in
+            let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespaces) ?? ""
+            if !name.isEmpty { TabStackStore.shared.setName(name, for: stackID) }
+        })
+        present(alert, animated: true)
+    }
+
+    // MARK: Tab overview
+
+    func showTabOverview() {
+        guard presentedViewController == nil else { return }
+        let overview = TabOverviewViewController(
+            tabs: tabs, selectedIndex: selectedIndex,
+            onSelect: { [weak self] index in
+                self?.dismiss(animated: true)
+                guard let self, self.tabs.indices.contains(index) else { return }
+                if let sid = self.tabs[index].stackID { TabStackStore.shared.setCollapsed(false, for: sid) }
+                self.select(index: index)
+            },
+            onClose: { [weak self] tab in self?.close(tab: tab) },
+            onNewTab: { [weak self] in
+                self?.dismiss(animated: true)
+                self?.openTab(url: nil)
+            })
+        overview.modalPresentationStyle = .fullScreen
+        present(overview, animated: true)
     }
 
     // MARK: Element picker
@@ -1489,6 +1656,14 @@ extension BrowserContainerViewController: TabSidebarDelegate {
 
     func sidebarMenu(for index: Int) -> UIMenu? {
         tabMenu(for: index)
+    }
+
+    func sidebarStackMenu(for stackID: UUID) -> UIMenu? {
+        stackMenu(for: stackID)
+    }
+
+    func sidebarDidRequestOverview() {
+        showTabOverview()
     }
 }
 

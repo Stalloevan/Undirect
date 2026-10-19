@@ -32,6 +32,10 @@ final class Tab: NSObject {
     let webView: WKWebView
     weak var delegate: TabDelegate?
 
+    /// The tab stack this tab belongs to, if any (Vivaldi-style accordion
+    /// grouping in the sidebar). nil means a free-standing tab.
+    var stackID: UUID?
+
     private(set) var pendingURL: URL?
     /// Last real page URL, kept so a crashed web content process (which
     /// clears webView.url) can be restored instead of reloading nothing.

@@ -14,6 +14,8 @@ final class SessionStore {
         let state: Data?
         /// Optional so sessions saved by older versions still decode.
         let tor: Bool?
+        /// The tab stack this tab belonged to (UUID string), if any.
+        let stack: String?
     }
 
     struct SavedSession: Codable {
@@ -47,7 +49,7 @@ final class SessionStore {
         let saved = persistable.map { tab -> SavedTab in
             SavedTab(id: tab.id, url: tab.url?.absoluteString,
                      state: tab.isTor ? nil : Self.archive(tab.webView.interactionState),
-                     tor: tab.isTor)
+                     tor: tab.isTor, stack: tab.stackID?.uuidString)
         }
         let index = selected.flatMap { sel in persistable.firstIndex { $0 === sel } } ?? max(0, persistable.count - 1)
         if let data = try? JSONEncoder().encode(SavedSession(tabs: saved, selected: index)) {
@@ -66,7 +68,7 @@ final class SessionStore {
             let state = defaults.data(forKey: legacyStateKey)
             defaults.removeObject(forKey: legacyURLKey)
             defaults.removeObject(forKey: legacyStateKey)
-            return SavedSession(tabs: [SavedTab(id: UUID(), url: url, state: state, tor: false)], selected: 0)
+            return SavedSession(tabs: [SavedTab(id: UUID(), url: url, state: state, tor: false, stack: nil)], selected: 0)
         }
         return nil
     }
