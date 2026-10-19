@@ -334,6 +334,38 @@ final class Settings {
         get { bool("s.blockIPLookups", true) }
         set { set(newValue, "s.blockIPLookups") }
     }
+    /// On a Cloudflare "checking your browser" / Turnstile page, step the
+    /// fingerprint/WebRTC shields aside and keep the clearance cookies, so
+    /// the check passes instead of looping.
+    var cloudflareFriendly: Bool {
+        get { bool("s.cloudflareFriendly", true) }
+        set { set(newValue, "s.cloudflareFriendly") }
+    }
+    /// Skip in-player video ads (pre-roll and mid-roll) where the page lets us.
+    var skipVideoAds: Bool {
+        get { bool("s.skipVideoAds", true) }
+        set { set(newValue, "s.skipVideoAds") }
+    }
+
+    /// Per-site page zoom, keyed by registrable domain (1.0 == 100%).
+    func pageZoom(for host: String?) -> Double {
+        guard let host, !host.isEmpty else { return defaultZoom }
+        let map = defaults.dictionary(forKey: "s.pageZoom") as? [String: Double] ?? [:]
+        return map[DomainUtil.baseDomain(host)] ?? defaultZoom
+    }
+    func setPageZoom(_ zoom: Double, for host: String?) {
+        guard let host, !host.isEmpty else { return }
+        var map = defaults.dictionary(forKey: "s.pageZoom") as? [String: Double] ?? [:]
+        let key = DomainUtil.baseDomain(host)
+        if abs(zoom - defaultZoom) < 0.001 { map[key] = nil } else { map[key] = zoom }
+        set(map, "s.pageZoom")
+    }
+    /// The zoom applied to sites with no per-site setting of their own.
+    var defaultZoom: Double {
+        get { defaults.object(forKey: "s.defaultZoom") == nil ? 1.0 : defaults.double(forKey: "s.defaultZoom") }
+        set { set(newValue, "s.defaultZoom") }
+    }
+    static let zoomSteps: [Double] = [0.5, 0.75, 0.85, 1.0, 1.15, 1.25, 1.5, 1.75, 2.0]
     /// Off by default: tabs are kept across launches unless the person opts in.
     var closeTabsOnExit: Bool {
         get { bool("s.closeTabsOnExit", false) }

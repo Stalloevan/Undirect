@@ -249,6 +249,12 @@ final class Tab: NSObject {
         webView.interactionState = interactionState
     }
 
+    /// Applies this site's saved page zoom (100% if none).
+    func applyZoom() {
+        let zoom = CGFloat(Settings.shared.pageZoom(for: host ?? webView.url?.host))
+        if abs(webView.pageZoom - zoom) > 0.001 { webView.pageZoom = zoom }
+    }
+
     func reinstallScripts() {
         guard !isPopup else { return }
         let controller = webView.configuration.userContentController
@@ -495,6 +501,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         userChainActive = false
+        applyZoom()
         MediaPlayback.shared.tabDidLeavePage(self)
         if let url = webView.url, url.scheme == "http" || url.scheme == "https" { lastKnownURL = url }
     }
@@ -553,6 +560,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         CookieGuard.shared.spoofAnalyticsCookies(in: webView.configuration.websiteDataStore.httpCookieStore)
+        applyZoom()
         loadFavicon()
         captureHistorySnapshot()
         samplePageBackground()

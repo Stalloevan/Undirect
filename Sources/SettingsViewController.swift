@@ -125,6 +125,7 @@ final class SettingsViewController: SettingsTableViewController {
                 })),
                 SettingsRow(title: "Hide common ad slots", kind: .toggle(get: { s.cosmeticFiltering }, set: { s.cosmeticFiltering = $0; blockingChanged() })),
                 SettingsRow(title: "Remove link tracking", kind: .toggle(get: { s.stripTrackers }, set: { s.stripTrackers = $0 })),
+                SettingsRow(title: "Skip video ads", kind: .toggle(get: { s.skipVideoAds }, set: {e { s.skipVideoAds = $0 } })),
                 SettingsRow(title: "Click through redirect layers", kind: .toggle(get: { s.clickThrough }, set: { s.clickThrough = $0 })),
                 SettingsRow(title: "Site exceptions (trusted & paused)", kind: .push({ SiteExceptionsViewController() })),
                 SettingsRow(title: "Hidden elements", kind: .push({ HiddenElementsViewController() }))
@@ -133,7 +134,8 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Fingerprinting protection", kind: .toggle(get: { s.fingerprintProtection }, set: { s.fingerprintProtection = $0 })),
                 SettingsRow(title: "Block WebRTC IP leaks", kind: .toggle(get: { s.blockWebRTC }, set: { s.blockWebRTC = $0 })),
                 SettingsRow(title: "Send Global Privacy Control", kind: .toggle(get: { s.sendGPC }, set: { s.sendGPC = $0 })),
-                SettingsRow(title: "Block IP-lookup & analytics services", kind: .toggle(get: { s.blockIPLookups }, set: { s.blockIPLookups = $0; blockingChanged() }))
+                SettingsRow(title: "Block IP-lookup & analytics services", kind: .toggle(get: { s.blockIPLookups }, set: { s.blockIPLookups = $0; blockingChanged() })),
+                SettingsRow(title: "Cloudflare-friendly checks", kind: .toggle(get: { s.cloudflareFriendly }, set: { s.cloudflareFriendly = $0 }))
             ]),
             SettingsSection(title: "Cookies", footer: "Cookie-consent pop-ups are rejected and hidden automatically — turn that off above to see them and choose yourself. Sites where you enter a password are remembered automatically so you stay logged in. Everything else is cleared.", rows: [
                 SettingsRow(title: "Auto-dismiss cookie banners", kind: .toggle(get: { s.autoHandleCookieBanners }, set: { s.autoHandleCookieBanners = $0 })),

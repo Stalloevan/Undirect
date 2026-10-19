@@ -59,6 +59,10 @@ final class BrowserContainerViewController: UIViewController {
     private var pickingTab: Tab?
     private var lastAppliedSidebarPosition: SidebarPosition?
     private var swipeNav: SwipeNavState?
+    /// Where a page pan began, so back/forward only triggers from a screen edge.
+    private var swipePanStartX: CGFloat?
+    /// How close to the edge a swipe must start to count (points).
+    private static let edgeSwipeZone: CGFloat = 40
     private var detectedManifest: WebAppManifest?
     private var shownInstallPromptFor: Set<String> = []
 
@@ -507,6 +511,7 @@ final class BrowserContainerViewController: UIViewController {
     @objc private func handlePagePan(_ gesture: UIPanGestureRecognizer) {
         switch gesture.state {
         case .began:
+            swipePanStartX = gesture.location(in: contentView).x
             if sidebarState != .hidden { setSidebarState(.hidden, animated: true) }
         case .changed:
             updateSwipeNavigation(gesture)
@@ -529,6 +534,15 @@ final class BrowserContainerViewController: UIViewController {
             guard abs(translation.x) > 12, abs(translation.x) > abs(translation.y) * 1.5,
                   let tab = currentTab, !tab.isBlank else { return }
             let direction: SwipeNavDirection = translation.x > 0 ? .back : .forward
+            // Only from the matching screen edge, like Safari: a back swipe
+            // must start near the left edge, forward near the right. This frees
+            // the middle of the page for the site's own horizontal gestures
+            // (carousels, sliders, maps).
+            let width = max(contentView.bounds.width, 1)
+            let startX = swipePanStartX ?? gesture.location(in: contentView).x - translation.x
+            let fromLeftEdge = startX <= Self.edgeSwipeZone
+            let fromRightEdge = startX >= width - Self.edgeSwipeZone
+            guard (direction == .back && fromLeftEdge) || (direction == .forward && fromRightEdge) else { return }
             if direction == .back {
                 if tab.webView.canGoBack, let item = tab.webView.backForwardList.backItem {
                     beginSwipeNavigation(direction: .back, item: item, tab: tab)
@@ -1110,6 +1124,52 @@ final class BrowserContainerViewController: UIViewController {
         openLocalFile(url, move: true)
     }
 
+    // MARK: Zoom
+
+    /// A submenu showing the current zoom with − / + / Reset. Changes are
+    /// saved per site and applied to every open tab on that site.
+    private func zoomMenu(for tab: Tab, host: String?) -> UIMenu {
+        let current = Settings.shared.pageZoom(for: host)
+        let percent = Int((current * 100).rounded())
+        let steps = Settings.zoomSteps
+        let canOut = current > steps.first! + 0.001
+        let canIn = current < steps.last! - 0.001
+
+        let zoomOut = UIAction(title: "Zoom Out", image: Theme.icon("minus.magnifyingglass"),
+                               attributes: canOut ? [] : .disabled) { [weak self] _ in
+            self?.stepZoom(host: host, by: -1)
+        }
+        let zoomIn = UIAction(title: "Zoom In", image: Theme.icon("plus.magnifyingglass"),
+                              attributes: canIn ? [] : .disabled) { [weak self] _ in
+            self?.stepZoom(host: host, by: +1)
+        }
+        let reset = UIAction(title: "Actual Size", image: Theme.icon("1.magnifyingglass"),
+                             attributes: abs(current - 1.0) < 0.001 ? .disabled : []) { [weak self] _ in
+            Settings.shared.setPageZoom(1.0, for: host)
+            self?.applyZoomToTabs(host: host)
+        }
+        return UIMenu(title: "Zoom — \(percent)%", image: Theme.icon("textformat.size"),
+                      children: [zoomOut, zoomIn, reset])
+    }
+
+    private func stepZoom(host: String?, by delta: Int) {
+        let steps = Settings.zoomSteps
+        let current = Settings.shared.pageZoom(for: host)
+        // Nearest step, then move by delta.
+        var index = steps.enumerated().min(by: { abs($0.element - current) < abs($1.element - current) })?.offset ?? 3
+        index = max(0, min(steps.count - 1, index + delta))
+        Settings.shared.setPageZoom(steps[index], for: host)
+        applyZoomToTabs(host: host)
+    }
+
+    private func applyZoomToTabs(host: String?) {
+        guard let host else { return }
+        let base = DomainUtil.baseDomain(host)
+        for tab in tabs where DomainUtil.baseDomain(tab.host ?? tab.webView.url?.host ?? "") == base {
+            tab.applyZoom()
+        }
+    }
+
     /// Actions for the whole page, reached from the ⋯ button in the address bar.
     /// Favorite / trust / hide-element / pause-blocking live on the tab itself
     /// (long-press the tab in the sidebar) instead of here.
@@ -1136,6 +1196,7 @@ final class BrowserContainerViewController: UIViewController {
             pageActions.append(UIAction(title: "Share", image: Theme.icon("square.and.arrow.up")) { [weak self] _ in
                 self?.present(UIActivityViewController(activityItems: [url], applicationActivities: nil), animated: true)
             })
+            pageActions.append(zoomMenu(for: tab, host: url.host))
         }
         if let manifest = detectedManifest, tab.webView.url != nil, !tab.isTor,
            manifest.startURL.host == tab.webView.url?.host {

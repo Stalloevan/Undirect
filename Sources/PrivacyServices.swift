@@ -54,10 +54,28 @@ final class CookieGuard {
         let active = Set(activeHosts.map { DomainUtil.baseDomain($0) })
         let store = WKWebsiteDataStore.default()
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
+        // Keep data for sites still holding a Cloudflare clearance cookie, so
+        // passing the check once lasts instead of being re-challenged every visit.
+        store.httpCookieStore.getAllCookies { cookies in
+            let cfProtected: Set<String> = Settings.shared.cloudflareFriendly
+                ? Set(cookies.filter { Self.isClearanceCookie($0.name) }.map { DomainUtil.baseDomain($0.domain) })
+                : []
+            self.cleanUpRecords(active: active, cfProtected: cfProtected, store: store, types: types)
+        }
+    }
+
+    static func isClearanceCookie(_ name: String) -> Bool {
+        let n = name.lowercased()
+        return n == "cf_clearance" || n == "__cf_bm" || n.hasPrefix("cf_chl")
+    }
+
+    private func cleanUpRecords(active: Set<String>, cfProtected: Set<String>,
+                               store: WKWebsiteDataStore, types: Set<String>) {
         store.fetchDataRecords(ofTypes: types) { records in
             let doomed = records.filter { record in
                 let name = record.displayName.lowercased()
-                return !self.keptLogins.contains(host: name) && !active.contains(DomainUtil.baseDomain(name))
+                let base = DomainUtil.baseDomain(name)
+                return !self.keptLogins.contains(host: name) && !active.contains(base) && !cfProtected.contains(base)
             }
             guard !doomed.isEmpty else { return }
             store.removeData(ofTypes: types, for: doomed) {

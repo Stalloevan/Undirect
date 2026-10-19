@@ -25,7 +25,8 @@ enum WebEngine {
     /// their scripts reinstalled when this changes.
     static func scriptSettingsSignature() -> String {
         let s = Settings.shared
-        let flags = [s.autoHandleCookieBanners, s.blockWebRTC, s.sendGPC, s.fingerprintProtection]
+        let flags = [s.autoHandleCookieBanners, s.blockWebRTC, s.sendGPC, s.fingerprintProtection,
+                     s.cloudflareFriendly, s.skipVideoAds]
         return flags.map { $0 ? "1" : "0" }.joined() + "|" + s.appTheme.rawValue
     }
 
@@ -54,7 +55,11 @@ enum WebEngine {
         let gpc = Settings.shared.sendGPC
         let fp = tor || Settings.shared.fingerprintProtection
         if webrtc || gpc || fp {
-            add(shieldScript(webrtc: webrtc, gpc: gpc, fingerprint: fp, tor: tor), mainFrameOnly: false, world: .page)
+            add(shieldScript(webrtc: webrtc, gpc: gpc, fingerprint: fp, tor: tor,
+                             cfFriendly: Settings.shared.cloudflareFriendly), mainFrameOnly: false, world: .page)
+        }
+        if Settings.shared.skipVideoAds {
+            add(adSkipScript, mainFrameOnly: false, world: .page)
         }
     }
 
@@ -70,10 +75,22 @@ enum WebEngine {
     /// values, which still count — so hardware/media APIs are removed, while
     /// canvas/WebGL/audio (which can't be removed without breaking pages) get
     /// per-site, per-launch noise that makes the fingerprint unlinkable.
-    private static func shieldScript(webrtc: Bool, gpc: Bool, fingerprint: Bool, tor: Bool) -> String {
+    private static func shieldScript(webrtc: Bool, gpc: Bool, fingerprint: Bool, tor: Bool, cfFriendly: Bool) -> String {
         """
         (function () {
-          var CFG = { webrtc: \(webrtc), gpc: \(gpc), fp: \(fingerprint), tor: \(tor) };
+          var CFG = { webrtc: \(webrtc), gpc: \(gpc), fp: \(fingerprint), tor: \(tor), cf: \(cfFriendly) };
+          // Cloudflare's "verify you are human" check (Turnstile) reads the
+          // very properties the fingerprint shield rewrites, so it loops
+          // forever with the shield on. Step aside on the challenge itself
+          // (its own iframe host) and on a page actively showing one.
+          if (CFG.cf) {
+            try {
+              var h = (location.hostname || '').toLowerCase();
+              if (h === 'challenges.cloudflare.com' || h.indexOf('.challenges.cloudflare.com') !== -1) return;
+              if (document.getElementById('challenge-form') || document.getElementById('cf-challenge-running') ||
+                  document.querySelector('[class*="cf-turnstile"], [id*="cf-chl"], script[src*="challenges.cloudflare.com"]')) return;
+            } catch (e) {}
+          }
           if (window.__undirectShield) return;
           window.__undirectShield = true;
           var done = new WeakSet();
@@ -305,6 +322,81 @@ enum WebEngine {
     /// selector list for everything else, and calls each platform's own
     /// "reject non-essential" API where one exists rather than just hiding
     /// the banner blind. Turn off in Settings to see banners normally.
+    /// Skips in-player video ads: clicks a visible "Skip" button the moment
+    /// it's clickable, and when the player marks the current clip as an ad,
+    /// mutes it and jumps to the end so the real video starts. Runs only on
+    /// elements the page itself labels as ads, so ordinary video is untouched.
+    private static let adSkipScript = #"""
+    (function () {
+      if (window.__undirectAdSkip) return;
+      window.__undirectAdSkip = true;
+
+      var SKIP = [
+        '.ytp-ad-skip-button', '.ytp-ad-skip-button-modern', '.ytp-skip-ad-button',
+        '.videoAdUiSkipButton', '.jw-skip', '.vjs-overlay-skip-button', '.skip-button',
+        '[class*="skipButton" i]', '[class*="skip-ad" i]', '[class*="ad-skip" i]',
+        '[id*="skip-ad" i]', '[aria-label*="skip ad" i]', 'button[title*="skip" i]'
+      ];
+      // A player is "in an ad" when one of these marks it.
+      var AD_MARK = /(^|[^a-z])ad-(showing|interrupting|container|playing)|ad-showing|-ads?-|advertisement/i;
+
+      function visible(el) {
+        if (!el) return false;
+        var r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) return false;
+        var s = getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05 && !el.disabled;
+      }
+      function clickSkips(root) {
+        for (var i = 0; i < SKIP.length; i++) {
+          var els;
+          try { els = root.querySelectorAll(SKIP[i]); } catch (e) { continue; }
+          for (var j = 0; j < els.length; j++) {
+            var el = els[j];
+            if (visible(el) && !el.__undirectClicked) {
+              el.__undirectClicked = true;
+              try { el.click(); } catch (e) {}
+            }
+          }
+        }
+      }
+      // If the video element sits inside an ad-marked container, end the ad.
+      function fastForwardAd() {
+        var vids = document.querySelectorAll('video');
+        for (var i = 0; i < vids.length; i++) {
+          var v = vids[i];
+          if (!v.duration || !isFinite(v.duration) || v.duration <= 0) continue;
+          var inAd = false, n = v;
+          for (var depth = 0; depth < 6 && n; depth++) {
+            var token = (n.className && n.className.baseVal !== undefined ? n.className.baseVal : (n.className || '')) + ' ' + (n.id || '');
+            if (AD_MARK.test(String(token))) { inAd = true; break; }
+            n = n.parentElement;
+          }
+          if (inAd && v.currentTime < v.duration - 0.4) {
+            try { v.muted = true; v.currentTime = v.duration; } catch (e) {}
+          }
+        }
+      }
+      function sweep(root) { clickSkips(root || document); fastForwardAd(); }
+
+      function run() {
+        sweep(document);
+        try {
+          var mo = new MutationObserver(function () {
+            clearTimeout(window.__undirectAdDebounce);
+            window.__undirectAdDebounce = setTimeout(function () { sweep(document); }, 120);
+          });
+          mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+        } catch (e) {}
+        // Poll as a backstop: some players swap the skip button in without a
+        // DOM mutation the observer sees (canvas/shadow players).
+        setInterval(function () { sweep(document); }, 700);
+      }
+      if (document.documentElement) run();
+      else document.addEventListener('DOMContentLoaded', run, { once: true });
+    })();
+    """#
+
     private static let consentAutoHandlerScript = """
     (function () {
       var selectors = [
