@@ -125,7 +125,7 @@ final class SettingsViewController: SettingsTableViewController {
                 })),
                 SettingsRow(title: "Hide common ad slots", kind: .toggle(get: { s.cosmeticFiltering }, set: { s.cosmeticFiltering = $0; blockingChanged() })),
                 SettingsRow(title: "Remove link tracking", kind: .toggle(get: { s.stripTrackers }, set: { s.stripTrackers = $0 })),
-                SettingsRow(title: "Skip video ads", kind: .toggle(get: { s.skipVideoAds }, set: {e { s.skipVideoAds = $0 } })),
+                SettingsRow(title: "Skip video ads", kind: .toggle(get: { s.skipVideoAds }, set: { s.skipVideoAds = $0 })),
                 SettingsRow(title: "Click through redirect layers", kind: .toggle(get: { s.clickThrough }, set: { s.clickThrough = $0 })),
                 SettingsRow(title: "Site exceptions (trusted & paused)", kind: .push({ SiteExceptionsViewController() })),
                 SettingsRow(title: "Hidden elements", kind: .push({ HiddenElementsViewController() }))
