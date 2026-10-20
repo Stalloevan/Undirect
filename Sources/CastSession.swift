@@ -21,6 +21,7 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
     private var routePicker: AVRoutePickerView?
     private var pictureInPicture = false
     private var watchdog: Timer?
+    private var errorLogToken: NSObjectProtocol?
 
     private init(relayURL: URL, isTor: Bool, title: String, startAt: Double) {
         self.isTor = isTor
@@ -47,6 +48,21 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
                 AppLog.shared.log("Cast player couldn't play the stream: \(item.error?.localizedDescription ?? "unknown error")", category: "media")
             }
         })
+        observations.append(item.observe(\.status, options: [.new]) { item, _ in
+            if item.status == .readyToPlay { AppLog.shared.log("Cast player: stream ready", category: "media") }
+        })
+        observations.append(player.observe(\.timeControlStatus, options: [.new]) { player, _ in
+            let state = player.timeControlStatus == .playing ? "playing"
+                : player.timeControlStatus == .paused ? "paused" : "waiting (\(player.reasonForWaitingToPlay?.rawValue ?? "?"))"
+            AppLog.shared.log("Cast player: \(state)", category: "media")
+        })
+        observations.append(player.observe(\.isExternalPlaybackActive, options: [.new]) { player, _ in
+            AppLog.shared.log("Cast player: TV playback \(player.isExternalPlaybackActive ? "active" : "inactive")", category: "media")
+        })
+        errorLogToken = NotificationCenter.default.addObserver(forName: .AVPlayerItemNewErrorLogEntry, object: item, queue: .main) { note in
+            guard let event = (note.object as? AVPlayerItem)?.errorLog()?.events.last else { return }
+            AppLog.shared.log("Cast player error \(event.errorStatusCode): \(event.errorComment ?? "-")", category: "media")
+        }
         // When the TV disconnects and the player isn't on screen, we're done.
         observations.append(player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] player, _ in
             DispatchQueue.main.async {
@@ -149,6 +165,7 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
         watchdog?.invalidate()
         watchdog = nil
         observations.removeAll()
+        if let token = errorLogToken { NotificationCenter.default.removeObserver(token); errorLogToken = nil }
         player.pause()
         player.replaceCurrentItem(with: nil)
         routePicker?.removeFromSuperview()

@@ -86,6 +86,7 @@ final class CastRelay {
             self.loggedDirect = false
             self.loggedErrorBody = false
             self.pageFetchBroken = false
+            self.traceCount = 0
 
             let config = URLSessionConfiguration.ephemeral
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -220,10 +221,7 @@ final class CastRelay {
             return Self.sendStatus(404, on: connection)
         }
 
-        if !loggedRequest {
-            loggedRequest = true
-            AppLog.shared.log("Cast relay: TV asked for \(upstream.host ?? "?")\(upstream.path.suffix(24)) (\(method), range \(headers["range"] ?? "none"))", category: "media")
-        }
+        trace("TV \(method) \(upstream.lastPathComponent.suffix(28)) range \(headers["range"] ?? "none")")
 
         // Whole files and playlist/segment requests go through the page.
         // Byte-range requests (large single files) stream over URLSession so
@@ -320,6 +318,17 @@ final class CastRelay {
 
     fileprivate func finished(_ task: RelayTask) {
         activeTasks.removeValue(forKey: ObjectIdentifier(task))
+    }
+
+    private var traceCount = 0
+    /// A short log line per relayed request (first 80 per cast), so a stalled
+    /// cast shows exactly which request the TV made last and how it ended.
+    fileprivate func trace(_ message: String) {
+        queue.async {
+            guard self.traceCount < 80 else { return }
+            self.traceCount += 1
+            AppLog.shared.log("Cast relay: \(message)", category: "media")
+        }
     }
 
     /// One line about the first direct (non-page) answer: status, type, size
@@ -443,8 +452,12 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     private var pendingBytes = 0
     private var suspended = false
     private var done = false
+    private var status = 0
+    private var totalSent = 0
+    private let label: String
 
     init(task: URLSessionDataTask, connection: NWConnection, isHead: Bool, relay: CastRelay) {
+        self.label = String((task.originalRequest?.url?.lastPathComponent ?? "?").suffix(28))
         self.task = task
         self.connection = connection
         self.isHead = isHead
@@ -454,6 +467,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     func cancel() {
         guard !done else { return }
         done = true
+        relay?.trace("TV closed \(label) after \(totalSent) bytes (status \(status))")
         task.cancel()
         connection.cancel()
         relay?.finished(self)
@@ -462,6 +476,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let http = response as? HTTPURLResponse else { completionHandler(.cancel); return }
+        status = http.statusCode
         let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
         let path = (http.url?.path ?? "").lowercased()
         isPlaylist = type.contains("mpegurl") || path.hasSuffix(".m3u8")
@@ -504,6 +519,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard !done else { return }
         if let error, !headersSent {
+            relay?.trace("failed \(label): \(error.localizedDescription)")
             relay?.logUpstreamFailure("couldn't reach the site: \(error.localizedDescription)")
             CastRelay.sendStatus(502, on: connection)
             done = true
@@ -524,6 +540,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     }
 
     private func send(_ data: Data) {
+        totalSent += data.count
         pendingBytes += data.count
         connection.send(content: data, completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
@@ -538,6 +555,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     private func finish() {
         guard !done else { return }
         done = true
+        relay?.trace("sent \(label): \(status), \(totalSent) bytes")
         connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
                         completion: .contentProcessed { [connection] _ in connection.cancel() })
         relay?.finished(self)
