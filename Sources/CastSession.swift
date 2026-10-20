@@ -21,6 +21,7 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
     private var routePicker: AVRoutePickerView?
     private var pictureInPicture = false
     private var watchdog: Timer?
+    private var lastPlaying = Date()
     private var errorLogToken: NSObjectProtocol?
 
     private init(relayURL: URL, isTor: Bool, title: String, startAt: Double) {
@@ -45,23 +46,24 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
         }
         observations.append(item.observe(\.status, options: [.new]) { item, _ in
             if item.status == .failed {
-                AppLog.shared.log("Cast player couldn't play the stream: \(item.error?.localizedDescription ?? "unknown error")", category: "media")
+                CastRelay.shared.trace("player couldn't play the stream: \(item.error?.localizedDescription ?? "unknown error")")
+                CastRelay.shared.flushTrace(reason: "player failed")
             }
         })
         observations.append(item.observe(\.status, options: [.new]) { item, _ in
-            if item.status == .readyToPlay { AppLog.shared.log("Cast player: stream ready", category: "media") }
+            if item.status == .readyToPlay { CastRelay.shared.trace("player: stream ready") }
         })
         observations.append(player.observe(\.timeControlStatus, options: [.new]) { player, _ in
             let state = player.timeControlStatus == .playing ? "playing"
                 : player.timeControlStatus == .paused ? "paused" : "waiting (\(player.reasonForWaitingToPlay?.rawValue ?? "?"))"
-            AppLog.shared.log("Cast player: \(state)", category: "media")
+            CastRelay.shared.trace("player: \(state)")
         })
         observations.append(player.observe(\.isExternalPlaybackActive, options: [.new]) { player, _ in
-            AppLog.shared.log("Cast player: TV playback \(player.isExternalPlaybackActive ? "active" : "inactive")", category: "media")
+            CastRelay.shared.trace("player: TV playback \(player.isExternalPlaybackActive ? "active" : "inactive")")
         })
         errorLogToken = NotificationCenter.default.addObserver(forName: .AVPlayerItemNewErrorLogEntry, object: item, queue: .main) { note in
             guard let event = (note.object as? AVPlayerItem)?.errorLog()?.events.last else { return }
-            AppLog.shared.log("Cast player error \(event.errorStatusCode): \(event.errorComment ?? "-")", category: "media")
+            CastRelay.shared.trace("player error \(event.errorStatusCode): \(event.errorComment ?? "-")")
         }
         // When the TV disconnects and the player isn't on screen, we're done.
         observations.append(player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] player, _ in
@@ -95,7 +97,14 @@ final class CastSession: NSObject, AVPlayerViewControllerDelegate {
         watchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
             let visible = self.playerController?.viewIfLoaded?.window != nil
-            if !visible && !self.pictureInPicture && !self.player.isExternalPlaybackActive { self.end() }
+            if !visible && !self.pictureInPicture && !self.player.isExternalPlaybackActive { self.end(); return }
+            // A cast that hangs on the TV's spinner raises no error, so no
+            // playback for 20 s counts as a failure and keeps the full trace.
+            if self.player.timeControlStatus == .playing {
+                self.lastPlaying = Date()
+            } else if Date().timeIntervalSince(self.lastPlaying) > 20 {
+                CastRelay.shared.flushTrace(reason: "no playback for 20 s")
+            }
         }
     }
 

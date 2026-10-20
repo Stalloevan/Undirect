@@ -86,7 +86,12 @@ final class CastRelay {
             self.loggedDirect = false
             self.loggedErrorBody = false
             self.pageFetchBroken = false
-            self.traceCount = 0
+            self.traceBuffer.removeAll()
+            self.traceLive = false
+            self.castStart = Date()
+            self.requestCount = 0
+            self.bytesServed = 0
+            self.stopping = false
 
             let config = URLSessionConfiguration.ephemeral
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -144,6 +149,7 @@ final class CastRelay {
 
     private func stopLocked() {
         guard listener != nil || session != nil else { return }
+        stopping = true
         listener?.cancel()
         listener = nil
         for task in activeTasks.values { task.cancel() }
@@ -153,7 +159,15 @@ final class CastRelay {
         routes.removeAll()
         routeIDs.removeAll()
         context = nil
-        AppLog.shared.log("Cast relay stopped", category: "media")
+        if traceLive {
+            AppLog.shared.log("Cast relay stopped", category: "media")
+        } else {
+            let seconds = Int(Date().timeIntervalSince(castStart))
+            let megabytes = Double(bytesServed) / 1_000_000
+            AppLog.shared.log(String(format: "Cast relay stopped normally: %d requests, %.1f MB, %d s (detail dropped)",
+                                     requestCount, megabytes, seconds), category: "media")
+        }
+        traceBuffer.removeAll()
     }
 
     // MARK: Routes
@@ -221,6 +235,7 @@ final class CastRelay {
             return Self.sendStatus(404, on: connection)
         }
 
+        requestCount += 1
         trace("TV \(method) \(upstream.lastPathComponent.suffix(28)) range \(headers["range"] ?? "none")")
 
         // Whole files and playlist/segment requests go through the page.
@@ -320,15 +335,42 @@ final class CastRelay {
         activeTasks.removeValue(forKey: ObjectIdentifier(task))
     }
 
-    private var traceCount = 0
-    /// A short log line per relayed request (first 80 per cast), so a stalled
-    /// cast shows exactly which request the TV made last and how it ended.
-    fileprivate func trace(_ message: String) {
+    private var traceBuffer: [String] = []
+    private var traceLive = false
+    private var castStart = Date()
+    private var requestCount = 0
+    private var bytesServed = 0
+    private var stopping = false
+    /// Flight recorder: every relayed request and player event is kept in
+    /// memory for the length of the cast. If the cast goes wrong (a failed
+    /// request, a player error, or a spinner that never turns into playback)
+    /// the whole trace is written to the log; if it ends normally only a
+    /// one-line summary is kept.
+    func trace(_ message: String) {
         queue.async {
-            guard self.traceCount < 80 else { return }
-            self.traceCount += 1
-            AppLog.shared.log("Cast relay: \(message)", category: "media")
+            let line = String(format: "[+%.1fs] ", Date().timeIntervalSince(self.castStart)) + message
+            if self.traceLive {
+                AppLog.shared.log("Cast relay: \(line)", category: "media")
+            } else {
+                self.traceBuffer.append(line)
+                if self.traceBuffer.count > 600 { self.traceBuffer.removeFirst(100) }
+            }
         }
+    }
+
+    /// Writes the recorded trace to the log and keeps logging live from here on.
+    func flushTrace(reason: String) {
+        queue.async {
+            guard !self.traceLive else { return }
+            self.traceLive = true
+            AppLog.shared.log("Cast relay: \(reason) — keeping the full trace", category: "media")
+            for line in self.traceBuffer { AppLog.shared.log("Cast relay: \(line)", category: "media") }
+            self.traceBuffer.removeAll()
+        }
+    }
+
+    fileprivate func addServed(_ bytes: Int) {
+        queue.async { self.bytesServed += bytes }
     }
 
     /// One line about the first direct (non-page) answer: status, type, size
@@ -355,7 +397,8 @@ final class CastRelay {
     fileprivate func logUpstreamFailure(_ message: String) {
         guard !loggedFailure else { return }
         loggedFailure = true
-        AppLog.shared.log("Cast relay: \(message)", category: "media")
+        trace("problem: \(message)")
+        flushTrace(reason: message)
     }
 
     /// Rewrites every URI in an HLS playlist (variants, segments, keys,
@@ -622,6 +665,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
         guard !done else { return }
         done = true
         relay?.trace("sent \(label): \(status), \(totalSent) bytes")
+        relay?.addServed(totalSent)
         connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
                         completion: .contentProcessed { [connection] _ in connection.cancel() })
         relay?.finished(self)
