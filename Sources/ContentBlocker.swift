@@ -66,7 +66,11 @@ final class ContentBlocker {
     /// app update that doesn't touch the lists reuses the already-compiled
     /// rules instead of recompiling tens of thousands of them at launch.
     private static func contentKey(_ text: String) -> String {
-        let digest = SHA256.hash(data: Data(text.utf8))
+        contentKey(Data(text.utf8))
+    }
+
+    private static func contentKey(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
         return rulesFormat + "-" + digest.prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -86,7 +90,53 @@ final class ContentBlocker {
         }
     }
 
+    // MARK: Launch readiness
+
+    /// True once the first set of rules is installed (or a short safety
+    /// timeout has passed). Pages that load at launch wait for this, so the
+    /// first requests aren't sent before ads and trackers are blocked.
+    private(set) var initialRulesReady = false
+    private var readyWaiters: [() -> Void] = []
+
+    func whenInitialRulesReady(_ block: @escaping () -> Void) {
+        // generation 0: nothing has asked for rules (e.g. a preview), don't wait.
+        if initialRulesReady || generation == 0 { block() } else { readyWaiters.append(block) }
+    }
+
+    private func markInitialRulesReady() {
+        guard !initialRulesReady else { return }
+        initialRulesReady = true
+        let waiters = readyWaiters
+        readyWaiters = []
+        waiters.forEach { $0() }
+    }
+
+    /// The parsed domain list, shared by the navigation check and any rule
+    /// chunk that has to be compiled. Parsed at most once, on first use.
+    private final class DomainList {
+        private let data: Data
+        private let lock = NSLock()
+        private var parsed: [String]?
+        init(data: Data) { self.data = data }
+        var domains: [String] {
+            lock.lock(); defer { lock.unlock() }
+            if let parsed { return parsed }
+            let result = ContentBlocker.parseDomains(data)
+            parsed = result
+            return result
+        }
+    }
+
+    private static func chunkCountKey(level: BlocklistLevel, version: String) -> String {
+        "com.stalloevan.undirect.rules.chunks.\(level.rawValue).\(version)"
+    }
+
     /// (Re)builds the rule lists from the current settings.
+    ///
+    /// On a normal launch the compiled lists are already in WebKit's cache, so
+    /// they're looked up straight away (their names are remembered from the
+    /// last build) while the domain list is parsed in parallel for the
+    /// navigation check — rules are ready in a fraction of the old time.
     func rebuild() {
         generation += 1
         let gen = generation
@@ -95,29 +145,48 @@ final class ContentBlocker {
         let cookies = Settings.shared.blockThirdPartyCookies
         let shields = Settings.shared.blockIPLookups
         isCompiling = true
+        if gen == 1 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, !self.initialRulesReady else { return }
+                AppLog.shared.log("Content rules still compiling after 1.5 s; loading pages anyway", category: "block")
+                self.markInitialRulesReady()
+            }
+        }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            var domains: [String] = []
-            var version = Self.staticRulesKey
-            if let name = level.resourceName,
-               let url = Bundle.main.url(forResource: name, withExtension: "txt"),
-               let text = try? String(contentsOf: url, encoding: .utf8) {
-                version = Self.contentKey(text)
-                domains = text.split(whereSeparator: \.isNewline)
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty && !$0.hasPrefix("#") && Self.isPlainDomain($0) }
+            let loaded: (version: String, list: DomainList?) = {
+                guard let name = level.resourceName,
+                      let url = Bundle.main.url(forResource: name, withExtension: "txt"),
+                      let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+                    return (Self.staticRulesKey, nil)
+                }
+                return (Self.contentKey(data), DomainList(data: data))
+            }()
+            let version = loaded.version
+            let list = loaded.list
+            let countKey = Self.chunkCountKey(level: level, version: version)
+            let chunkCount: Int
+            if list == nil {
+                chunkCount = 0
+            } else if let known = UserDefaults.standard.object(forKey: countKey) as? Int {
+                chunkCount = known
+            } else {
+                // First build of this list: parse now to know how many chunks.
+                let total = list?.domains.count ?? 0
+                chunkCount = (total + Self.chunkSize - 1) / Self.chunkSize
+                UserDefaults.standard.set(chunkCount, forKey: countKey)
             }
 
-            // Each spec: identifier + a closure producing its JSON (only built if not cached).
+            // Each spec: identifier + a closure producing its JSON (only built,
+            // off the main thread, if WebKit doesn't have it cached).
             var specs: [(String, () -> String)] = []
-            var index = 0
-            var start = 0
-            while start < domains.count {
-                let end = min(start + Self.chunkSize, domains.count)
-                let slice = domains[start..<end]
-                specs.append(("undirect-\(level.rawValue)-\(index)-b\(version)", { Self.domainRulesJSON(slice) }))
-                index += 1
-                start = end
+            for index in 0..<chunkCount {
+                specs.append(("undirect-\(level.rawValue)-\(index)-b\(version)", {
+                    let all = list?.domains ?? []
+                    let start = min(index * Self.chunkSize, all.count)
+                    let end = min(start + Self.chunkSize, all.count)
+                    return Self.domainRulesJSON(all[start..<end])
+                }))
             }
             let fixed = Self.staticRulesKey
             if cosmetic {
@@ -132,18 +201,23 @@ final class ContentBlocker {
             if cookies {
                 specs.append(("undirect-3pcookies-b\(fixed)", { Self.thirdPartyCookieJSON() }))
             }
-            let set = Set(domains)
 
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
-                self.blockedDomains = set
                 self.compile(specs, generation: gen)
+            }
+            // In parallel: the domain set for blocking ad/tracker sites you'd
+            // otherwise be sent to as a whole page.
+            let set = Set(list?.domains ?? [])
+            DispatchQueue.main.async {
+                guard gen == self.generation else { return }
+                self.blockedDomains = set
             }
         }
     }
 
     private func compile(_ specs: [(String, () -> String)], generation gen: Int) {
-        guard let store = WKContentRuleListStore.default() else { return }
+        guard let store = WKContentRuleListStore.default() else { markInitialRulesReady(); return }
         var results = [WKContentRuleList?](repeating: nil, count: specs.count)
         let group = DispatchGroup()
 
@@ -155,14 +229,20 @@ final class ContentBlocker {
                     group.leave()
                     return
                 }
-                let json = spec.1()
-                store.compileContentRuleList(forIdentifier: spec.0, encodedContentRuleList: json) { list, error in
-                    if let error {
-                        NSLog("Undirect: rule list \(spec.0) failed: \(error)")
-                        AppLog.shared.log("Rule list \(spec.0) failed to compile: \(error.localizedDescription)", category: "block")
+                // Building tens of thousands of rules is heavy: do it off the
+                // main thread, then hand it to WebKit to compile.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let json = spec.1()
+                    DispatchQueue.main.async {
+                        store.compileContentRuleList(forIdentifier: spec.0, encodedContentRuleList: json) { list, error in
+                            if let error {
+                                NSLog("Undirect: rule list \(spec.0) failed: \(error)")
+                                AppLog.shared.log("Rule list \(spec.0) failed to compile: \(error.localizedDescription)", category: "block")
+                            }
+                            results[i] = list
+                            group.leave()
+                        }
                     }
-                    results[i] = list
-                    group.leave()
                 }
             }
         }
@@ -171,10 +251,47 @@ final class ContentBlocker {
             guard gen == self.generation else { return }
             self.ruleLists = results.compactMap { $0 }
             self.isCompiling = false
-            AppLog.shared.log("Content rules compiled: \(self.ruleLists.count)/\(specs.count) lists, \(self.blockedDomains.count) blocked domains", category: "block")
+            AppLog.shared.log("Content rules compiled: \(self.ruleLists.count)/\(specs.count) lists", category: "block")
             NotificationCenter.default.post(name: Self.didUpdate, object: nil)
+            self.markInitialRulesReady()
             self.removeStaleLists(keeping: Set(specs.map { $0.0 }))
         }
+    }
+
+    /// One domain per line; blank lines and # comments skipped; only plain
+    /// hostnames kept. Works on the raw bytes — several times faster than
+    /// splitting and trimming Swift strings for 160k+ lines.
+    fileprivate static func parseDomains(_ data: Data) -> [String] {
+        var out: [String] = []
+        out.reserveCapacity(data.count / 18)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            let n = bytes.count
+            var i = 0
+            while i < n {
+                var start = i
+                while i < n && bytes[i] != 0x0A { i += 1 }
+                var end = i
+                i += 1
+                while start < end, bytes[start] == 0x20 || bytes[start] == 0x09 || bytes[start] == 0x0D { start += 1 }
+                while end > start, bytes[end - 1] == 0x20 || bytes[end - 1] == 0x09 || bytes[end - 1] == 0x0D { end -= 1 }
+                guard end > start, bytes[start] != 0x23 else { continue }
+                var plain = true
+                var hasDot = false
+                for j in start..<end {
+                    let c = bytes[j]
+                    if c == 0x2E { hasDot = true; continue }
+                    if !((c >= 0x61 && c <= 0x7A) || (c >= 0x30 && c <= 0x39) || c == 0x2D || c == 0x5F) {
+                        plain = false
+                        break
+                    }
+                }
+                if plain && hasDot {
+                    out.append(String(decoding: UnsafeBufferPointer(rebasing: bytes[start..<end]), as: UTF8.self))
+                }
+            }
+        }
+        return out
     }
 
     private func removeStaleLists(keeping: Set<String>) {
@@ -197,12 +314,6 @@ final class ContentBlocker {
     }
 
     // MARK: JSON builders
-
-    private static func isPlainDomain(_ s: String) -> Bool {
-        s.contains(".") && s.unicodeScalars.allSatisfy {
-            ($0 >= "a" && $0 <= "z") || ($0 >= "0" && $0 <= "9") || $0 == "." || $0 == "-" || $0 == "_"
-        }
-    }
 
     private static func domainRulesJSON(_ domains: ArraySlice<String>) -> String {
         var s = "["

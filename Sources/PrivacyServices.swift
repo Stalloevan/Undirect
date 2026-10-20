@@ -251,6 +251,34 @@ final class FaviconStore {
         return nil
     }
 
+    /// Loads icons for `hosts` from disk on background threads (in parallel)
+    /// and decodes them there, so later lookups are memory hits instead of
+    /// main-thread file reads. `completion` runs on main.
+    func prewarm(hosts: [String], completion: @escaping () -> Void) {
+        let keys = Array(Set(hosts.map(key))).filter { memory[$0] == nil && !knownMissingOnDisk.contains($0) }
+        guard !keys.isEmpty else { completion(); return }
+        let dir = directory
+        DispatchQueue.global(qos: .userInitiated).async {
+            let lock = NSLock()
+            var loaded: [String: UIImage] = [:]
+            var missing: [String] = []
+            DispatchQueue.concurrentPerform(iterations: keys.count) { i in
+                let k = keys[i]
+                let file = dir.appendingPathComponent(k + ".png")
+                let image = (try? Data(contentsOf: file)).flatMap(UIImage.init(data:))
+                let ready = image?.preparingForDisplay() ?? image
+                lock.lock()
+                if let ready { loaded[k] = ready } else { missing.append(k) }
+                lock.unlock()
+            }
+            DispatchQueue.main.async {
+                for (k, image) in loaded where self.memory[k] == nil { self.memory[k] = image }
+                self.knownMissingOnDisk.formUnion(missing)
+                completion()
+            }
+        }
+    }
+
     /// Fetches over a plain ephemeral session. Never call this for Tor tabs.
     func fetch(host: String, hint: URL?, completion: @escaping (UIImage?) -> Void) {
         if let image = cached(host: host) { completion(image); return }

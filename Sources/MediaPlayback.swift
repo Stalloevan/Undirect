@@ -46,7 +46,7 @@ final class MediaPlayback {
     /// Called once at launch. Only sets the category — the session becomes
     /// active when a page actually plays something, so opening Undirect
     /// never interrupts music from another app.
-    func configureAudioSession() {
+    static func configureAudioSession() {
         // Default route sharing: the long-form-video policy hands the whole
         // app's output to the TV as if it were a native video player, which
         // left the TV on a loading spinner for web video.

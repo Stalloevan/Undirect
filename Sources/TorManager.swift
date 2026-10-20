@@ -227,19 +227,43 @@ final class TorManager {
 
     private func monitorBootstrap() {
         let deadline = Date().addingTimeInterval(45)
+        var tuned = false
         while Date() < deadline {
             if case .failed = state { return }
             if !isRunning { return }
-            if let progress = bootstrapProgress() {
-                if progress >= 100, circuitEstablished() == true {
+            // Progress and circuit state in one control round trip.
+            if let status = bootstrapStatus() {
+                if !tuned {
+                    tuned = true
+                    tuneForBrowsing()
+                }
+                if status.progress >= 100, status.circuit {
                     state = .ready
                     return
                 }
-                state = .starting(min(progress, 99))
+                state = .starting(min(status.progress, 99))
             }
-            Thread.sleep(forTimeInterval: 0.5)
+            // Polled often: readiness is noticed (and waiting tabs start
+            // loading) within a fraction of a second instead of up to half a
+            // second late at every step.
+            Thread.sleep(forTimeInterval: 0.15)
         }
         state = .failed("timed out")
+    }
+
+    /// Settings applied once the control channel answers. Each is a plain
+    /// SETCONF/SIGNAL, so an option this Tor build doesn't know is just
+    /// refused — it can never stop Tor from starting.
+    private func tuneForBrowsing() {
+        // Tor goes dormant after a day unused and can come back up dormant;
+        // make sure it's awake and building circuits right away.
+        send("SIGNAL ACTIVE")
+        // Multipath ("conflux") circuits: ask exits to favor the lower-latency
+        // path. Pages are many small requests, so time-to-first-byte matters
+        // more than raw throughput.
+        if let reply = send("SETCONF ConfluxClientUX=latency"), !reply.hasPrefix("250") {
+            AppLog.shared.log("Tor: low-latency mode not supported by this build", category: "tor")
+        }
     }
 
     // MARK: Control channel
@@ -280,10 +304,11 @@ final class TorManager {
         return socket.send("AUTHENTICATE \(hex)")?.hasPrefix("250") ?? false
     }
 
-    private func bootstrapProgress() -> Int? {
-        guard let reply = send("GETINFO status/bootstrap-phase"),
-              let range = reply.range(of: "PROGRESS=[0-9]+", options: .regularExpression) else { return nil }
-        return Int(reply[range].dropFirst("PROGRESS=".count))
+    private func bootstrapStatus() -> (progress: Int, circuit: Bool)? {
+        guard let reply = send("GETINFO status/bootstrap-phase status/circuit-established"),
+              let range = reply.range(of: "PROGRESS=[0-9]+", options: .regularExpression),
+              let progress = Int(reply[range].dropFirst("PROGRESS=".count)) else { return nil }
+        return (progress, reply.contains("circuit-established=1"))
     }
 
     private func circuitEstablished() -> Bool? {
@@ -446,7 +471,7 @@ final class TorManager {
                 DispatchQueue.main.async { NotificationCenter.default.post(name: Self.didRefresh, object: nil) }
                 return
             }
-            Thread.sleep(forTimeInterval: 0.5)
+            Thread.sleep(forTimeInterval: 0.2)
         }
         restartInProcess(reason: "no working circuit after wake")
     }
@@ -496,7 +521,7 @@ final class TorManager {
                 return
             }
             if case .failed = state { return }
-            Thread.sleep(forTimeInterval: 0.5)
+            Thread.sleep(forTimeInterval: 0.2)
         }
     }
 

@@ -199,10 +199,16 @@ final class BrowserContainerViewController: UIViewController {
         if ntp.additionalSafeAreaInsets != ntpInset { ntp.additionalSafeAreaInsets = ntpInset }
     }
 
+    private var lastAddressBarTint: UIColor?
+
     /// Tints the floating bar with the current page's own background color
     /// (Safari-style), fading from transparent above into solid at the bottom.
     private func updateAddressBarTint(for tab: Tab) {
         let color = tab.isBlank ? Theme.background : (tab.pageBackgroundColor ?? Theme.background)
+        // Runs on every progress update; re-setting the gradient makes Core
+        // Animation re-render it even when the color hasn't changed.
+        if let last = lastAddressBarTint, last.isEqual(color) { return }
+        lastAddressBarTint = color
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         addressGradient.colors = [color.withAlphaComponent(0).cgColor,
@@ -672,25 +678,42 @@ final class BrowserContainerViewController: UIViewController {
             SessionStore.shared.clear()
             AppLog.shared.log("Starting fresh: 'close tabs on exit' is on", category: "app")
         } else if let session = SessionStore.shared.restore(), !session.tabs.isEmpty {
+            // Every tab is restored lazily: only the one on screen loads now,
+            // the rest load when you switch to them. Launch does a fraction
+            // of the work and memory, and the visible page gets the network.
             for saved in session.tabs {
                 let isTor = saved.tor ?? false
                 let tab = makeTab(tor: isTor, id: saved.id)
                 tab.stackID = saved.stack.flatMap(UUID.init(uuidString:))
-                if !isTor, let state = saved.state, saved.url != nil {
-                    tab.restore(interactionState: state)
-                } else if let s = saved.url, let url = URL(string: s) {
-                    tab.load(url)
-                }
+                let url = saved.url.flatMap(URL.init(string:))
+                tab.deferRestore(state: url == nil ? nil : saved.state, url: url, title: saved.title)
                 tabs.append(tab)
             }
             selectedIndex = min(max(0, session.selected), tabs.count - 1)
             AppLog.shared.log("Restored \(tabs.count) tab(s)", category: "app")
+            prewarmFavicons()
         }
         if tabs.isEmpty {
             tabs.append(makeTab(tor: Settings.shared.torForNewTabs))
             selectedIndex = 0
         }
         showCurrentTab()
+    }
+
+    /// Reads the tabs' and favorites' icons from disk in parallel, off the
+    /// main thread, so the tab bar and new tab page don't do it one by one.
+    private func prewarmFavicons() {
+        var hosts = tabs.compactMap { $0.isTor ? nil : $0.host }
+        hosts += FavoritesStore.shared.all().compactMap { URL(string: $0.urlString)?.host }
+        FaviconStore.shared.prewarm(hosts: hosts) { [weak self] in
+            guard let self else { return }
+            for tab in self.tabs where tab.favicon == nil && !tab.isTor {
+                tab.favicon = FaviconStore.shared.cached(host: tab.host)
+            }
+            self.lastSidebarSignature = []
+            self.refreshSidebar()
+            if !self.ntp.view.isHidden { self.ntp.reload() }
+        }
     }
 
     private var persistScheduled = false
@@ -765,6 +788,7 @@ final class BrowserContainerViewController: UIViewController {
         for sub in contentView.subviews where sub is WKWebView { sub.removeFromSuperview() }
         detectedManifest = nil
         guard let tab = currentTab else { return }
+        tab.activateIfDeferred()
         // Immersive mode lays the web view out with constraints; switch back
         // to autoresizing or it stops following rotation/size changes.
         tab.webView.translatesAutoresizingMaskIntoConstraints = true

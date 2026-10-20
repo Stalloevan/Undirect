@@ -16,6 +16,8 @@ final class SessionStore {
         let tor: Bool?
         /// The tab stack this tab belonged to (UUID string), if any.
         let stack: String?
+        /// Shown in the tab bar until the tab is opened (tabs load lazily).
+        let title: String?
     }
 
     struct SavedSession: Codable {
@@ -47,15 +49,30 @@ final class SessionStore {
         if onlyIfChanged, signature == lastSignature { return }
         lastSignature = signature
         let saved = persistable.map { tab -> SavedTab in
-            SavedTab(id: tab.id, url: tab.url?.absoluteString,
-                     state: tab.isTor ? nil : Self.archive(tab.webView.interactionState),
-                     tor: tab.isTor, stack: tab.stackID?.uuidString)
+            // History only for a page that has actually loaded (or the saved
+            // history of a tab not opened yet) — never a blank web view's
+            // empty state, which would restore as an empty tab.
+            let state: Data? = tab.isTor ? nil
+                : tab.isDeferred ? tab.deferredState
+                : tab.webView.url == nil ? nil
+                : Self.archive(tab.webView.interactionState)
+            return SavedTab(id: tab.id, url: tab.url?.absoluteString,
+                     state: state,
+                     tor: tab.isTor, stack: tab.stackID?.uuidString,
+                     title: (tab.isTor || tab.url == nil) ? nil : tab.title)
         }
         let index = selected.flatMap { sel in persistable.firstIndex { $0 === sel } } ?? max(0, persistable.count - 1)
-        if let data = try? JSONEncoder().encode(SavedSession(tabs: saved, selected: index)) {
-            UserDefaults.standard.set(data, forKey: key)
+        // Encoding every tab's history and writing it out happens off the
+        // main thread; only reading the web views' state has to happen here.
+        let key = self.key
+        writeQueue.async {
+            if let data = try? JSONEncoder().encode(SavedSession(tabs: saved, selected: index)) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
         }
     }
+
+    private let writeQueue = DispatchQueue(label: "undirect.session.write", qos: .utility)
 
     func restore() -> SavedSession? {
         let defaults = UserDefaults.standard
@@ -68,14 +85,23 @@ final class SessionStore {
             let state = defaults.data(forKey: legacyStateKey)
             defaults.removeObject(forKey: legacyURLKey)
             defaults.removeObject(forKey: legacyStateKey)
-            return SavedSession(tabs: [SavedTab(id: UUID(), url: url, state: state, tor: false, stack: nil)], selected: 0)
+            return SavedSession(tabs: [SavedTab(id: UUID(), url: url, state: state, tor: false, stack: nil, title: nil)], selected: 0)
         }
         return nil
     }
 
+    /// Whether the saved session includes a Tor tab (decides whether to start
+    /// Tor first thing at launch).
+    func hasTorTabs() -> Bool {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let session = try? JSONDecoder().decode(SavedSession.self, from: data) else { return false }
+        return session.tabs.contains { $0.tor == true }
+    }
+
     func clear() {
         lastSignature = nil
-        UserDefaults.standard.removeObject(forKey: key)
+        let key = self.key
+        writeQueue.async { UserDefaults.standard.removeObject(forKey: key) }
     }
 
     private static func archive(_ state: Any?) -> Data? {

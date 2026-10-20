@@ -126,7 +126,20 @@ enum Theme {
         UIColor(red: 0.0, green: 0.788, blue: 0.831, alpha: 1)   // cyan
     ]
 
+    /// Built icons, per theme. The chrome asks for the same handful of
+    /// symbols on every page-load progress update; building each one means
+    /// font-descriptor and symbol-configuration work every time.
+    private static let iconCache = NSCache<NSString, UIImage>()
+
     static func icon(_ name: String, pointSize: CGFloat = 17, weight: UIImage.SymbolWeight = .regular) -> UIImage? {
+        let cacheKey = "\(name)|\(pointSize)|\(weight.rawValue)|\(Settings.shared.appTheme.rawValue)" as NSString
+        if let cached = iconCache.object(forKey: cacheKey) { return cached }
+        guard let image = makeIcon(name, pointSize: pointSize, weight: weight) else { return nil }
+        iconCache.setObject(image, forKey: cacheKey)
+        return image
+    }
+
+    private static func makeIcon(_ name: String, pointSize: CGFloat, weight: UIImage.SymbolWeight) -> UIImage? {
         let base = UIFont.systemFont(ofSize: pointSize, weight: .regular).fontDescriptor
         let font: UIFont
         if let designed = base.withDesign(symbolDesign) {

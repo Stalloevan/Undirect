@@ -37,6 +37,22 @@ final class Tab: NSObject {
     var stackID: UUID?
 
     private(set) var pendingURL: URL?
+
+    /// A restored tab that hasn't been shown yet. Its page loads the first
+    /// time it's selected, so launch only loads the tab you're looking at.
+    private enum DeferredRestore {
+        case state(Data, URL?)
+        case url(URL)
+        var url: URL? {
+            switch self {
+            case .state(_, let url): return url
+            case .url(let url): return url
+            }
+        }
+    }
+    private var deferredRestore: DeferredRestore?
+    /// The title saved with the session, shown until the page has its own.
+    private var savedTitle: String?
     /// Last real page URL, kept so a crashed web content process (which
     /// clears webView.url) can be restored instead of reloading nothing.
     private var lastKnownURL: URL?
@@ -172,10 +188,10 @@ final class Tab: NSObject {
 
     // MARK: Public
 
-    var url: URL? { webView.url ?? pendingURL }
+    var url: URL? { webView.url ?? pendingURL ?? deferredRestore?.url }
     var host: String? { url?.host }
     var isBlank: Bool {
-        guard !webView.isLoading, pendingURL == nil else { return false }
+        guard !webView.isLoading, pendingURL == nil, deferredRestore == nil else { return false }
         guard let url = webView.url else { return true }
         return url.absoluteString == "about:blank"
     }
@@ -183,6 +199,7 @@ final class Tab: NSObject {
 
     var title: String {
         if let t = webView.title, !t.isEmpty { return t }
+        if let t = savedTitle, !t.isEmpty { return t }
         if let h = host { return DomainUtil.normalize(h) }
         return "New Tab"
     }
@@ -193,6 +210,17 @@ final class Tab: NSObject {
 
     func load(_ url: URL) {
         expectedURL = url
+        // At launch, wait (briefly) for the ad/tracker rules so the first
+        // requests aren't sent unfiltered.
+        if !url.isFileURL && !ContentBlocker.shared.initialRulesReady {
+            pendingURL = url
+            delegate?.tabDidChange(self)
+            ContentBlocker.shared.whenInitialRulesReady { [weak self] in
+                guard let self, self.pendingURL == url else { return }
+                self.load(url)
+            }
+            return
+        }
         if url.isFileURL {
             // Local HTML opened from Files / the share sheet. Read access is
             // limited to the file's own folder inside Undirect's storage.
@@ -252,6 +280,48 @@ final class Tab: NSObject {
     func restore(interactionState: Any) {
         webView.interactionState = interactionState
     }
+
+    /// Remembers a saved tab without loading it; see `activateIfDeferred`.
+    func deferRestore(state: Data?, url: URL?, title: String?) {
+        savedTitle = title
+        if let state, !isTor {
+            deferredRestore = .state(state, url)
+        } else if let url {
+            deferredRestore = .url(url)
+        }
+    }
+
+    var isDeferred: Bool { deferredRestore != nil }
+
+    /// The saved history of a tab that hasn't been shown yet, so saving the
+    /// session never wipes it.
+    var deferredState: Data? {
+        if case .state(let data, _) = deferredRestore { return data }
+        return nil
+    }
+
+    /// Loads a deferred tab's page (called when it's first shown). The saved
+    /// history stays in `deferredRestore` until it's actually handed to the
+    /// web view, so a session save in between can't lose it.
+    func activateIfDeferred() {
+        guard let restore = deferredRestore, !activationPending else { return }
+        switch restore {
+        case .url(let url):
+            deferredRestore = nil
+            load(url)
+        case .state(let data, let url):
+            activationPending = true
+            ContentBlocker.shared.whenInitialRulesReady { [weak self] in
+                guard let self, self.deferredRestore != nil else { return }
+                self.activationPending = false
+                self.deferredRestore = nil
+                self.applyContentRules(for: url?.host)
+                self.webView.interactionState = data
+                self.delegate?.tabDidChange(self)
+            }
+        }
+    }
+    private var activationPending = false
 
     /// Applies this site's saved page zoom (100% if none).
     func applyZoom() {
@@ -520,6 +590,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         userChainActive = false
+        savedTitle = nil
         applyZoom()
         MediaPlayback.shared.tabDidLeavePage(self)
         if let url = webView.url, url.scheme == "http" || url.scheme == "https" { lastKnownURL = url }

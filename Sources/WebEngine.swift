@@ -46,6 +46,10 @@ enum WebEngine {
         // UI, and streams AirPlay often can't play). Without it, fullscreen
         // video uses the native iOS player and its AirPlay button.
         config.defaultWebpagePreferences.preferredContentMode = .mobile
+        // Sites on WebKit's known-HTTPS list go straight to https:// instead
+        // of an http:// request that just redirects (one round trip saved —
+        // several seconds' worth over Tor).
+        config.upgradeKnownHostsToHTTPS = true
         return config
     }
 
@@ -72,7 +76,8 @@ enum WebEngine {
             controller.addUserScript(WKUserScript(source: body, injectionTime: .atDocumentStart,
                                                   forMainFrameOnly: mainFrameOnly, in: world))
         }
-        add(viewportFallbackScript, mainFrameOnly: false, world: world)
+        // A viewport tag only means anything in the top-level page.
+        add(viewportFallbackScript, mainFrameOnly: true, world: world)
         add(darkThemeScript, mainFrameOnly: false, world: world)
         add(agentScript(messageName: messageName), mainFrameOnly: false, world: world)
         add(MediaPlayback.script(messageName: messageName), mainFrameOnly: false, world: world)
@@ -413,21 +418,34 @@ enum WebEngine {
       }
       function sweep(root) { clickSkips(root || document); fastForwardAd(); }
 
-      function run() {
+      // Dormant until a video actually loads in this frame: most pages (and
+      // most frames) have none, and the observer + timer cost CPU and battery
+      // on every one of them otherwise.
+      var vids = document.getElementsByTagName('video');
+      var started = false;
+      function start() {
+        if (started) return;
+        started = true;
         sweep(document);
         try {
           var mo = new MutationObserver(function () {
+            if (document.hidden) return;
             clearTimeout(window.__undirectAdDebounce);
             window.__undirectAdDebounce = setTimeout(function () { sweep(document); }, 120);
           });
           mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
         } catch (e) {}
         // Poll as a backstop: some players swap the skip button in without a
-        // DOM mutation the observer sees (canvas/shadow players).
-        setInterval(function () { sweep(document); }, 700);
+        // DOM mutation the observer sees (canvas/shadow players). Only while
+        // the tab is on screen and still has a video.
+        setInterval(function () { if (!document.hidden && vids.length) sweep(document); }, 700);
       }
-      if (document.documentElement) run();
-      else document.addEventListener('DOMContentLoaded', run, { once: true });
+      // Media events don't bubble, but a capturing listener on the document
+      // sees them from every video in the frame.
+      ['loadedmetadata', 'play', 'playing'].forEach(function (t) { document.addEventListener(t, start, true); });
+      function check() { if (vids.length) start(); }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', check, { once: true });
+      else check();
     })();
     """#
 
