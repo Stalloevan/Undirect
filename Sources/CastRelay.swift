@@ -378,6 +378,16 @@ final class CastRelay {
                     let relayed = register(absolute).absoluteString
                     result = (result as NSString).replacingCharacters(in: match.range(at: 1), with: relayed)
                 }
+                if trimmed.hasPrefix("#EXT-X-STREAM-INF"), let bw = try? NSRegularExpression(pattern: "BANDWIDTH=(\\d+)") {
+                    // Relayed segments often run above the rate the site
+                    // declares; understating it makes players complain.
+                    for match in bw.matches(in: result, range: NSRange(location: 0, length: (result as NSString).length)).reversed() {
+                        let r = match.range(at: 1)
+                        if let value = Int((result as NSString).substring(with: r)) {
+                            result = (result as NSString).replacingCharacters(in: r, with: String(value * 3))
+                        }
+                    }
+                }
                 out.append(result)
             } else if let absolute = URL(string: trimmed, relativeTo: base)?.absoluteURL,
                       ["http", "https"].contains(absolute.scheme?.lowercased() ?? "") {
@@ -447,6 +457,8 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     private let isHead: Bool
     private weak var relay: CastRelay?
     private var isPlaylist = false
+    private var bufferSegment = false
+    private var segmentType = ""
     private var playlistData = Data()
     private var headersSent = false
     private var pendingBytes = 0
@@ -484,9 +496,17 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
         if http.statusCode >= 400 {
             relay?.logUpstreamFailure("site answered \(http.statusCode) for \(http.url?.host ?? "?")")
         }
-        if !isPlaylist {
+        // Whole HLS segments are small. Hold each one so a disguised segment
+        // (served as an "image", or with junk bytes in front) can be handed to
+        // the TV as the video it really is — strict TVs refuse it otherwise.
+        let hasRange = task_originalRange(dataTask) != nil
+        let isVideoFile = type.hasPrefix("video/mp4") || type.hasPrefix("video/webm") || type.hasPrefix("audio/")
+        bufferSegment = !isPlaylist && !hasRange && !isHead && http.statusCode < 400 && !isVideoFile
+            && (http.expectedContentLength < 0 || http.expectedContentLength < 12_000_000)
+        segmentType = type
+        if !isPlaylist && !bufferSegment {
             var head = "HTTP/1.1 \(http.statusCode) OK\r\n"
-            if !type.isEmpty { head += "Content-Type: \(type)\r\n" }
+            if !type.isEmpty { head += "Content-Type: \(Self.honestType(type, path: path))\r\n" }
             // URLSession decodes compressed bodies, so the original length
             // only holds when the body wasn't encoded.
             if http.value(forHTTPHeaderField: "Content-Encoding") == nil, http.expectedContentLength >= 0 {
@@ -505,7 +525,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
         if let http = dataTask.response as? HTTPURLResponse, http.statusCode >= 400 {
             relay?.logErrorBody(data)
         }
-        if isPlaylist {
+        if isPlaylist || bufferSegment {
             playlistData.append(data)
             return
         }
@@ -526,6 +546,16 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
             relay?.finished(self)
             return
         }
+        if bufferSegment, !headersSent {
+            let prepared = Self.prepareSegment(playlistData)
+            relay?.trace("segment \(label): was \(segmentType.isEmpty ? "no type" : segmentType), first bytes \(prepared.firstBytes), \(prepared.note)")
+            let status = (task.response as? HTTPURLResponse)?.statusCode ?? 200
+            let head = "HTTP/1.1 \(status) OK\r\nContent-Type: \(prepared.type)\r\nContent-Length: \(prepared.body.count)\r\nAccept-Ranges: none\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+            send(Data(head.utf8))
+            headersSent = true
+            send(prepared.body)
+            playlistData = Data()
+        }
         if isPlaylist, !headersSent {
             let base = task.response?.url ?? task.originalRequest?.url ?? URL(string: "about:blank")!
             let text = String(decoding: playlistData, as: UTF8.self)
@@ -537,6 +567,42 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
             if !isHead { send(body) }
         }
         finish()
+    }
+
+    private func task_originalRange(_ task: URLSessionTask) -> String? {
+        task.originalRequest?.value(forHTTPHeaderField: "Range")
+    }
+
+    /// A segment mislabeled as an image or generic file is declared as video.
+    private static func honestType(_ type: String, path: String) -> String {
+        if type.hasPrefix("image/") || type.hasPrefix("text/") || type == "application/octet-stream"
+            || type == "binary/octet-stream" { return "video/mp2t" }
+        return type
+    }
+
+    /// Finds the real media inside a segment response: skips junk in front of
+    /// MPEG-TS, and labels MPEG-TS / fragmented MP4 / AAC correctly.
+    private static func prepareSegment(_ data: Data) -> (body: Data, type: String, note: String, firstBytes: String) {
+        let first = data.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let bytes = [UInt8](data.prefix(20_000))
+        if bytes.count > 600 {
+            let limit = bytes.count - 376
+            var i = 0
+            while i < limit {
+                if bytes[i] == 0x47 && bytes[i + 188] == 0x47 && bytes[i + 376] == 0x47 {
+                    return (i == 0 ? data : data.dropFirst(i), "video/mp2t", i == 0 ? "MPEG-TS" : "MPEG-TS after \(i) junk bytes", first)
+                }
+                i += 1
+            }
+        }
+        if bytes.count > 12 {
+            let tag = String(decoding: bytes[4..<8], as: UTF8.self)
+            if ["ftyp", "styp", "moof", "sidx"].contains(tag) { return (data, "video/mp4", "fragmented MP4", first) }
+        }
+        if bytes.starts(with: Array("ID3".utf8)) || (bytes.count > 2 && bytes[0] == 0xFF && (bytes[1] & 0xF0) == 0xF0) {
+            return (data, "audio/aac", "AAC", first)
+        }
+        return (data, "video/mp2t", "unrecognized, sent as video", first)
     }
 
     private func send(_ data: Data) {
