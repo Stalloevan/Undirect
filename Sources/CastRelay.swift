@@ -57,6 +57,10 @@ final class CastRelay {
     private var activeTasks: [ObjectIdentifier: RelayTask] = [:]
     private var loggedFailure = false
     private var loggedPageSuccess = false
+    private var loggedRequest = false
+    private var loggedDirect = false
+    private var loggedErrorBody = false
+    private var pageFetchBroken = false
 
     private init() {}
 
@@ -78,6 +82,10 @@ final class CastRelay {
             self.token = Self.randomHex(16)
             self.loggedFailure = false
             self.loggedPageSuccess = false
+            self.loggedRequest = false
+            self.loggedDirect = false
+            self.loggedErrorBody = false
+            self.pageFetchBroken = false
 
             let config = URLSessionConfiguration.ephemeral
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -212,10 +220,15 @@ final class CastRelay {
             return Self.sendStatus(404, on: connection)
         }
 
+        if !loggedRequest {
+            loggedRequest = true
+            AppLog.shared.log("Cast relay: TV asked for \(upstream.host ?? "?")\(upstream.path.suffix(24)) (\(method), range \(headers["range"] ?? "none"))", category: "media")
+        }
+
         // Whole files and playlist/segment requests go through the page.
         // Byte-range requests (large single files) stream over URLSession so
         // the phone never holds a whole movie in memory.
-        if headers["range"] == nil, let fetcher = context.pageFetcher {
+        if headers["range"] == nil, !pageFetchBroken, let fetcher = context.pageFetcher {
             fetcher.fetch(upstream) { [weak self] result in
                 self?.queue.async {
                     guard let self else { return }
@@ -223,6 +236,9 @@ final class CastRelay {
                     case .success(let response):
                         self.sendPageResponse(response, for: upstream, isHead: method == "HEAD", on: connection)
                     case .failure(let error):
+                        // Cross-origin media usually can't be read by the page
+                        // (no CORS headers); don't keep trying for every segment.
+                        self.pageFetchBroken = true
                         self.logUpstreamFailure("page fetch failed (\(error.localizedDescription)); trying directly")
                         self.startSessionTask(upstream: upstream, method: method, range: nil, context: context,
                                               session: session, on: connection)
@@ -304,6 +320,27 @@ final class CastRelay {
 
     fileprivate func finished(_ task: RelayTask) {
         activeTasks.removeValue(forKey: ObjectIdentifier(task))
+    }
+
+    /// One line about the first direct (non-page) answer: status, type, size
+    /// and who answered — enough to tell a blocked request from a working one.
+    fileprivate func logDirect(_ http: HTTPURLResponse) {
+        guard !loggedDirect else { return }
+        loggedDirect = true
+        let server = http.value(forHTTPHeaderField: "Server") ?? "-"
+        let type = http.value(forHTTPHeaderField: "Content-Type") ?? "-"
+        let ray = http.value(forHTTPHeaderField: "cf-ray") != nil ? ", Cloudflare" : ""
+        AppLog.shared.log("Cast relay: direct fetch answered \(http.statusCode), \(type), \(http.expectedContentLength) bytes, server \(server)\(ray)", category: "media")
+    }
+
+    fileprivate func logErrorBody(_ data: Data) {
+        queue.async {
+            guard !self.loggedErrorBody else { return }
+            self.loggedErrorBody = true
+            let text = String(decoding: data.prefix(160), as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
+            AppLog.shared.log("Cast relay: error body: \(text)", category: "media")
+        }
     }
 
     fileprivate func logUpstreamFailure(_ message: String) {
@@ -428,6 +465,7 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
         let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
         let path = (http.url?.path ?? "").lowercased()
         isPlaylist = type.contains("mpegurl") || path.hasSuffix(".m3u8")
+        relay?.logDirect(http)
         if http.statusCode >= 400 {
             relay?.logUpstreamFailure("site answered \(http.statusCode) for \(http.url?.host ?? "?")")
         }
@@ -449,6 +487,9 @@ private final class RelayTask: NSObject, URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if let http = dataTask.response as? HTTPURLResponse, http.statusCode >= 400 {
+            relay?.logErrorBody(data)
+        }
         if isPlaylist {
             playlistData.append(data)
             return
@@ -529,17 +570,21 @@ final class PageFetcher {
     }
 
     private static let js = """
-        const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
-        const blob = await r.blob();
-        const dataURL = await new Promise(function (resolve, reject) {
-          const fr = new FileReader();
-          fr.onload = function () { resolve(fr.result); };
-          fr.onerror = function () { reject(fr.error); };
-          fr.readAsDataURL(blob);
-        });
-        const comma = dataURL.indexOf(',');
-        return { status: r.status, type: r.headers.get('content-type') || '', url: r.url || '',
-                 data: comma >= 0 ? dataURL.slice(comma + 1) : '' };
+        try {
+          const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
+          const blob = await r.blob();
+          const dataURL = await new Promise(function (resolve, reject) {
+            const fr = new FileReader();
+            fr.onload = function () { resolve(fr.result); };
+            fr.onerror = function () { reject(fr.error); };
+            fr.readAsDataURL(blob);
+          });
+          const comma = dataURL.indexOf(',');
+          return { status: r.status, type: r.headers.get('content-type') || '', url: r.url || '',
+                   data: comma >= 0 ? dataURL.slice(comma + 1) : '' };
+        } catch (e) {
+          return { error: String((e && e.message) || e) + ' [' + (new URL(url)).host + ' from ' + location.host + ']' };
+        }
         """
 
     /// Completion runs on the main queue. Times out after 25 s (e.g. if iOS
@@ -565,6 +610,10 @@ final class PageFetcher {
                 case .failure(let error):
                     finish(.failure(error))
                 case .success(let value):
+                    if let dict = value as? [String: Any], let message = dict["error"] as? String {
+                        finish(.failure(FetchError(message: message)))
+                        return
+                    }
                     guard let dict = value as? [String: Any],
                           let status = (dict["status"] as? NSNumber)?.intValue else {
                         finish(.failure(FetchError(message: "unexpected response")))
