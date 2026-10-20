@@ -38,6 +38,16 @@ final class BrowserContainerViewController: UIViewController {
     private let addressGradient = CAGradientLayer()
     private var sidebarWidth: NSLayoutConstraint!
     private let pulloutHandle = PulloutHandleView()
+    /// Where other tabs are loaded in the background (behind the page, so they
+    /// render and can be photographed). Never visible.
+    private let warmupHost = UIView()
+    private let snapshotOverlay = UIImageView()
+    private var overlayTabID: UUID?
+    private lazy var lifecycle = TabLifecycle(
+        tabs: { [weak self] in self?.tabs ?? [] },
+        current: { [weak self] in self?.currentTab },
+        host: warmupHost,
+        frame: { [weak self] in self?.contentView.bounds ?? .zero })
     private var pulloutTop: NSLayoutConstraint!
     private var pulloutLeading: NSLayoutConstraint!
     private var pulloutTrailing: NSLayoutConstraint!
@@ -86,6 +96,22 @@ final class BrowserContainerViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = Theme.background
         buildChrome()
+
+        warmupHost.alpha = 0.02
+        warmupHost.isUserInteractionEnabled = false
+        warmupHost.clipsToBounds = true
+        warmupHost.translatesAutoresizingMaskIntoConstraints = false
+        view.insertSubview(warmupHost, belowSubview: contentView)
+        NSLayoutConstraint.activate([
+            warmupHost.topAnchor.constraint(equalTo: contentView.topAnchor),
+            warmupHost.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            warmupHost.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            warmupHost.trailingAnchor.constraint(equalTo: contentView.trailingAnchor)
+        ])
+        snapshotOverlay.contentMode = .scaleToFill
+        snapshotOverlay.isUserInteractionEnabled = false
+        snapshotOverlay.isHidden = true
+        snapshotOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
         addChild(ntp)
         ntp.view.frame = contentView.bounds
@@ -143,6 +169,9 @@ final class BrowserContainerViewController: UIViewController {
         }
         restoreSession()
         sessionRestored = true
+        lifecycle.start()
+        // The tab on screen loads first; the others follow once it is done.
+        lifecycle.armWarmUp()
         LocalFiles.prune(keeping: tabs.compactMap { $0.url })
         let queued = pendingExternalURLs
         pendingExternalURLs = []
@@ -173,6 +202,7 @@ final class BrowserContainerViewController: UIViewController {
     /// their content processes under pressure, but our own caches go too.
     @objc private func handleMemoryWarning() {
         for tab in tabs where tab !== currentTab { tab.dropCaches() }
+        lifecycle.appDidEnterBackground()
     }
 
     override func viewDidLayoutSubviews() {
@@ -764,6 +794,7 @@ final class BrowserContainerViewController: UIViewController {
     private func close(tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         if AutomationRecorder.shared.tab === tab { stopRecording() }
+        lifecycle.tabClosed(tab)
         MediaPlayback.shared.tabDidLeavePage(tab)
         if pickingTab === tab { stopPicking() }
         tab.webView.stopLoading()
@@ -785,9 +816,17 @@ final class BrowserContainerViewController: UIViewController {
     }
 
     private func showCurrentTab() {
+        // The tab being left: take its picture while it is still on screen,
+        // and start its idle clock.
+        let leaving = contentView.subviews.compactMap { sub in tabs.first { $0.webView === sub } }.first
+        if let leaving, leaving !== currentTab {
+            leaving.captureSnapshotNow()
+            leaving.lastActiveAt = Date()
+        }
         for sub in contentView.subviews where sub is WKWebView { sub.removeFromSuperview() }
         detectedManifest = nil
         guard let tab = currentTab else { return }
+        lifecycle.userSelected(tab)
         tab.activateIfDeferred()
         // Immersive mode lays the web view out with constraints; switch back
         // to autoresizing or it stops following rotation/size changes.
@@ -907,6 +946,32 @@ final class BrowserContainerViewController: UIViewController {
 
         applySidebarPosition()
         refreshSidebar()
+        updateSnapshotOverlay()
+    }
+
+    /// While a tab you just opened is loading again, its last picture covers
+    /// the empty page so there is something to look at right away.
+    private func updateSnapshotOverlay() {
+        guard let tab = currentTab, tab.isRestoring, let image = TabSnapshotStore.shared.image(for: tab.id) else {
+            guard !snapshotOverlay.isHidden else { return }
+            UIView.animate(withDuration: 0.18, animations: { self.snapshotOverlay.alpha = 0 }) { finished in
+                guard finished, self.currentTab?.isRestoring != true else { return }
+                self.snapshotOverlay.isHidden = true
+                self.snapshotOverlay.image = nil
+                self.overlayTabID = nil
+            }
+            return
+        }
+        if overlayTabID != tab.id {
+            snapshotOverlay.image = image
+            overlayTabID = tab.id
+        }
+        if snapshotOverlay.superview !== contentView { contentView.addSubview(snapshotOverlay) }
+        snapshotOverlay.layer.removeAllAnimations()
+        snapshotOverlay.frame = contentView.bounds
+        contentView.bringSubviewToFront(snapshotOverlay)
+        snapshotOverlay.alpha = 1
+        snapshotOverlay.isHidden = false
     }
 
     private func refreshSidebar() {

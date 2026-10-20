@@ -168,6 +168,9 @@ final class SettingsViewController: SettingsTableViewController {
                     AppTheme.allCases.map { theme -> (String, () -> Void) in (theme.title, { s.appTheme = theme }) }
                 })),
                 SettingsRow(title: "Close all tabs when app closes", kind: .toggle(get: { s.closeTabsOnExit }, set: { s.closeTabsOnExit = $0 })),
+                SettingsRow(title: "Load other tabs in background", kind: .choice(value: { s.backgroundLoading.title }, options: {
+                    BackgroundLoading.allCases.map { mode -> (String, () -> Void) in (mode.title, { s.backgroundLoading = mode }) }
+                })),
                 SettingsRow(title: "Preload favorites on Wi-Fi", kind: .toggle(get: { s.preloadFavorites }, set: { s.preloadFavorites = $0 })),
                 SettingsRow(title: "Tab bar side", kind: .choice(value: { s.sidebarPosition.title }, options: {
                     SidebarPosition.allCases.map { pos -> (String, () -> Void) in (pos.title, { s.sidebarPosition = pos }) }

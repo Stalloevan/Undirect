@@ -104,7 +104,7 @@ final class SessionStore {
         writeQueue.async { UserDefaults.standard.removeObject(forKey: key) }
     }
 
-    private static func archive(_ state: Any?) -> Data? {
+    static func archive(_ state: Any?) -> Data? {
         if let data = state as? Data { return data }
         guard let state else { return nil }
         return try? NSKeyedArchiver.archivedData(withRootObject: state, requiringSecureCoding: false)

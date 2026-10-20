@@ -213,6 +213,20 @@ enum CookieCleanupMode: String, CaseIterable {
     }
 }
 
+/// When the other tabs are loaded in the background after launch (so their
+/// pictures are ready for the tab bar and switching).
+enum BackgroundLoading: String, CaseIterable {
+    case always, wifiOnly, off
+
+    var title: String {
+        switch self {
+        case .always: return "Always"
+        case .wifiOnly: return "Wi-Fi only"
+        case .off: return "Off"
+        }
+    }
+}
+
 enum SearchEngine: String, CaseIterable {
     case duckDuckGo, startpage, brave, mojeek, ecosia, google, bing, custom
 
@@ -309,6 +323,10 @@ final class Settings {
     var cookieCleanup: CookieCleanupMode {
         get { CookieCleanupMode(rawValue: defaults.string(forKey: "s.cleanup") ?? "") ?? .onTabClose }
         set { set(newValue.rawValue, "s.cleanup") }
+    }
+    var backgroundLoading: BackgroundLoading {
+        get { BackgroundLoading(rawValue: defaults.string(forKey: "s.backgroundLoading") ?? "") ?? .always }
+        set { set(newValue.rawValue, "s.backgroundLoading") }
     }
     var searchEngine: SearchEngine {
         get { SearchEngine(rawValue: defaults.string(forKey: "s.searchEngine") ?? "") ?? .duckDuckGo }

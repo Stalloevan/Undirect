@@ -254,8 +254,15 @@ final class DownloadManager: NSObject {
         var filename: String
         var mime: String
         let isTor: Bool
+        var source: ObjectIdentifier?
     }
     private var active: [ObjectIdentifier: Active] = [:]
+
+    /// True while a download that a page in `webView` started is still going.
+    func isDownloading(from webView: WKWebView) -> Bool {
+        let id = ObjectIdentifier(webView)
+        return active.values.contains { $0.source == id }
+    }
     /// Held while a Quick Look preview is on screen.
     private var previewSource: PreviewSource?
     /// Held while a document picker is on screen.
@@ -295,7 +302,8 @@ final class DownloadManager: NSObject {
     func track(_ download: WKDownload, isTor: Bool) {
         download.delegate = self
         let name = download.originalRequest?.url?.lastPathComponent ?? "download"
-        active[ObjectIdentifier(download)] = Active(fileURL: nil, filename: name, mime: "application/octet-stream", isTor: isTor)
+        active[ObjectIdentifier(download)] = Active(fileURL: nil, filename: name, mime: "application/octet-stream", isTor: isTor,
+                                                    source: download.webView.map(ObjectIdentifier.init))
     }
 
     // MARK: Routing

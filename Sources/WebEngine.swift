@@ -100,6 +100,11 @@ enum WebEngine {
         if Settings.shared.skipVideoAds {
             add(adSkipScript, mainFrameOnly: false, world: .page)
         }
+        // Lets the app tell whether a background tab has something live
+        // (open socket / event stream, text typed into a form) before it
+        // unloads it to save memory.
+        add(liveConnectionScript(), mainFrameOnly: true, world: .page)
+        add(unsavedInputScript, mainFrameOnly: true, world: world)
     }
 
     /// Per-launch random seed for fingerprint noise: stable within a session
@@ -352,6 +357,76 @@ enum WebEngine {
       }
       if (document.documentElement) inject();
       else document.addEventListener('DOMContentLoaded', inject, { once: true });
+    })();
+    """
+
+    /// Tracks WebSocket / EventSource objects so the app can ask "is anything
+    /// live on this page?" — chats, dashboards and feeds. Sites that already
+    /// needed the Cloudflare exemption are left completely untouched.
+    private static func liveConnectionScript() -> String {
+        """
+        (function () {
+          try {
+            if (window.__undirectLive) return;
+            if (\(CloudflareExemptions.scriptList).indexOf((location.hostname || '').toLowerCase()) !== -1) return;
+            var items = [];
+            function track(o) {
+              try { items.push(typeof WeakRef === 'function' ? new WeakRef(o) : { deref: function () { return o; } }); } catch (e) {}
+            }
+            ['WebSocket', 'EventSource'].forEach(function (name) {
+              var Orig = window[name];
+              if (typeof Orig !== 'function') return;
+              try {
+                window[name] = new Proxy(Orig, {
+                  construct: function (target, args, newTarget) {
+                    var o = Reflect.construct(target, args, newTarget);
+                    track(o);
+                    return o;
+                  }
+                });
+              } catch (e) {}
+            });
+            Object.defineProperty(window, '__undirectLive', {
+              value: function () {
+                var live = false;
+                items = items.filter(function (r) {
+                  var o = r.deref();
+                  if (!o) return false;
+                  if (o.readyState <= 1) { live = true; return true; }
+                  return false;
+                });
+                return live;
+              }
+            });
+          } catch (e) {}
+        })();
+        """
+    }
+
+    /// Remembers text the person typed into a form field or editor, so a
+    /// background tab holding an unsent message isn't unloaded.
+    private static let unsavedInputScript = """
+    (function () {
+      var edited = new Set();
+      var SKIP = { checkbox: 1, radio: 1, range: 1, color: 1, file: 1, button: 1, submit: 1, reset: 1, image: 1, hidden: 1 };
+      document.addEventListener('input', function (e) {
+        if (!e.isTrusted) return;
+        var t = e.target;
+        if (!(t instanceof Element)) return;
+        if (t.tagName === 'INPUT') { if (SKIP[(t.type || '').toLowerCase()]) return; }
+        else if (t.tagName !== 'TEXTAREA' && !t.isContentEditable) return;
+        edited.add(t);
+      }, true);
+      document.addEventListener('submit', function () { edited.clear(); }, true);
+      window.__undirectDirty = function () {
+        var dirty = false;
+        edited.forEach(function (el) {
+          if (!el.isConnected) { edited.delete(el); return; }
+          var v = ('value' in el) ? el.value : el.textContent;
+          if (v && String(v).trim().length) dirty = true;
+        });
+        return dirty;
+      };
     })();
     """
 

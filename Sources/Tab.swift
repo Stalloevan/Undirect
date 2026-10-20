@@ -51,6 +51,28 @@ final class Tab: NSObject {
         }
     }
     private var deferredRestore: DeferredRestore?
+
+    // MARK: Lifecycle (warm-up, unloading) — see TabLifecycle
+
+    /// Last time the person was looking at this tab (or it was created).
+    var lastActiveAt = Date()
+    /// True once the page has been loaded in this run of the app. A tab that
+    /// is unloaded again after being used must not be warmed up a second time.
+    private(set) var everLoadedThisRun = false
+    /// Being loaded in the background only to get a picture and a title.
+    private(set) var isWarmingUp = false
+    /// The person switched to this tab and its page is still loading, so its
+    /// last picture is shown over the empty page meanwhile.
+    private(set) var isRestoring = false
+    /// Called once when a load ends (finished or failed); used by warm-up.
+    var onLoadSettled: (() -> Void)?
+    /// The about:blank load that frees a page's memory when unloading.
+    private var discardingBlank = false
+    private var restoringWork: DispatchWorkItem?
+    private var activationPending = false
+    /// What the tab was restored from, kept while it loads so a failed
+    /// background load can be undone.
+    private var lastDeferred: DeferredRestore?
     /// The title saved with the session, shown until the page has its own.
     private var savedTitle: String?
     /// Last real page URL, kept so a crashed web content process (which
@@ -188,7 +210,7 @@ final class Tab: NSObject {
 
     // MARK: Public
 
-    var url: URL? { webView.url ?? pendingURL ?? deferredRestore?.url }
+    var url: URL? { deferredRestore?.url ?? webView.url ?? pendingURL }
     var host: String? { url?.host }
     var isBlank: Bool {
         guard !webView.isLoading, pendingURL == nil, deferredRestore == nil else { return false }
@@ -210,6 +232,7 @@ final class Tab: NSObject {
 
     func load(_ url: URL) {
         expectedURL = url
+        everLoadedThisRun = true
         // At launch, wait (briefly) for the ad/tracker rules so the first
         // requests aren't sent unfiltered.
         if !url.isFileURL && !ContentBlocker.shared.initialRulesReady {
@@ -300,20 +323,24 @@ final class Tab: NSObject {
         return nil
     }
 
-    /// Loads a deferred tab's page (called when it's first shown). The saved
+    /// Loads an unloaded tab's page (when it's shown, or warmed up). The saved
     /// history stays in `deferredRestore` until it's actually handed to the
     /// web view, so a session save in between can't lose it.
     func activateIfDeferred() {
         guard let restore = deferredRestore, !activationPending else { return }
+        lastDeferred = restore
+        everLoadedThisRun = true
+        if !isWarmingUp { beginRestoring() }
         switch restore {
         case .url(let url):
             deferredRestore = nil
             load(url)
-        case .state(let data, let url):
+        case .state(let data, _):
             activationPending = true
             ContentBlocker.shared.whenInitialRulesReady { [weak self] in
                 guard let self, self.deferredRestore != nil else { return }
                 self.activationPending = false
+                let url = self.deferredRestore?.url
                 self.deferredRestore = nil
                 self.applyContentRules(for: url?.host)
                 self.webView.interactionState = data
@@ -321,7 +348,173 @@ final class Tab: NSObject {
             }
         }
     }
-    private var activationPending = false
+
+    // MARK: Unloading and warm-up
+
+    var isLoadedLive: Bool {
+        guard !isPopup, deferredRestore == nil, !activationPending, !discardingBlank,
+              let scheme = webView.url?.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    /// Frees the page's memory. The history, scroll position and title are
+    /// kept (Tor tabs keep only their address), and the page loads again the
+    /// next time the tab is opened.
+    @discardableResult
+    func discard() -> Bool {
+        guard isLoadedLive, let url = webView.url else { return false }
+        let title = self.title
+        if !isTor, let state = SessionStore.archive(webView.interactionState) {
+            deferredRestore = .state(state, url)
+        } else {
+            deferredRestore = .url(url)
+        }
+        savedTitle = title
+        onLoadSettled = nil
+        isWarmingUp = false
+        isRestoring = false
+        restoringWork?.cancel()
+        dropCaches()
+        discardingBlank = true
+        // Safety: never stay in "discarding" if the blank load's callbacks don't arrive.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.discardingBlank = false }
+        webView.stopLoading()
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
+        delegate?.tabDidChange(self)
+        return true
+    }
+
+    func beginWarmUp() {
+        isWarmingUp = true
+        activateIfDeferred()
+    }
+
+    /// Warm-up is over and the page stays as it is.
+    func endWarmUp() {
+        isWarmingUp = false
+        onLoadSettled = nil
+    }
+
+    /// A background load failed or timed out before the page appeared: go
+    /// back to the saved (unloaded) state so opening the tab loads it normally.
+    func revertWarmUp() {
+        isWarmingUp = false
+        onLoadSettled = nil
+        webView.stopLoading()
+        activationPending = false
+        if let saved = lastDeferred {
+            deferredRestore = saved
+            everLoadedThisRun = false
+        }
+    }
+
+    /// The person opened this tab (possibly while it was still warming up).
+    func userTookOver() {
+        lastActiveAt = Date()
+        let wasWarming = isWarmingUp
+        isWarmingUp = false
+        onLoadSettled = nil
+        if wasWarming && webView.isLoading { beginRestoring() }
+    }
+
+    private func beginRestoring() {
+        isRestoring = true
+        restoringWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.endRestoring() }
+        restoringWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
+    }
+
+    private func endRestoring() {
+        restoringWork?.cancel()
+        guard isRestoring else { return }
+        isRestoring = false
+        delegate?.tabDidChange(self)
+    }
+
+    private func settleLoad() {
+        let handler = onLoadSettled
+        onLoadSettled = nil
+        handler?()
+    }
+
+    // MARK: Snapshots
+
+    /// A picture of what's on screen right now, kept in memory for the tab
+    /// bar overview and for showing while the page reloads. Synchronous, so
+    /// it can be taken as the person leaves the tab.
+    func captureSnapshotNow() {
+        guard isLoadedLive, !isWarmingUp, webView.window != nil, webView.bounds.width > 0,
+              !webView.isLoading || webView.estimatedProgress > 0.6 else { return }
+        let size = webView.bounds.size
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = min(UIScreen.main.scale, 600 / size.width)
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            webView.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: false)
+        }
+        TabSnapshotStore.shared.store(image, for: id)
+    }
+
+    /// Same, for a tab loaded in the background (needs a moment after load).
+    func captureSnapshotAsync(_ done: @escaping () -> Void) {
+        guard webView.bounds.width > 0 else { done(); return }
+        let config = WKSnapshotConfiguration()
+        config.snapshotWidth = NSNumber(value: Double(webView.bounds.width * 0.7))
+        config.afterScreenUpdates = true
+        webView.takeSnapshot(with: config) { [weak self] image, _ in
+            if let self, let image { TabSnapshotStore.shared.store(image, for: self.id) }
+            done()
+        }
+    }
+
+    // MARK: "Is anything live on this page?"
+
+    /// True if the page is playing or holding media, or a download from it is running.
+    var holdsMediaOrDownload: Bool {
+        if DownloadManager.shared.isDownloading(from: webView) { return true }
+        let media = MediaPlayback.shared
+        if media.tab === self && (media.state == .playing || media.isCasting) { return true }
+        return CastSession.current != nil && media.tab === self
+    }
+
+    /// Everything that should keep a background tab loaded: media (playing or
+    /// paused), an open socket / event stream, text typed into a form, or a
+    /// running download. Calls back on main; a page that doesn't answer
+    /// within 2 s counts as having nothing live.
+    func checkKeepAlive(_ completion: @escaping (_ reason: String?) -> Void) {
+        if holdsMediaOrDownload { completion("media or download"); return }
+        var reason: String?
+        var finished = false
+        let group = DispatchGroup()
+        func note(_ r: String) { if reason == nil { reason = r } }
+
+        group.enter()
+        webView.requestMediaPlaybackState { state in
+            if state != .none { note("media") }
+            group.leave()
+        }
+        group.enter()
+        webView.evaluateJavaScript("window.__undirectLive ? window.__undirectLive() : false", in: nil, in: .page) { result in
+            if case .success(let value) = result, (value as? Bool) == true { note("live connection") }
+            group.leave()
+        }
+        group.enter()
+        webView.evaluateJavaScript("window.__undirectDirty ? window.__undirectDirty() : false", in: nil, in: .defaultClient) { result in
+            if case .success(let value) = result, (value as? Bool) == true { note("unsent text") }
+            group.leave()
+        }
+        group.notify(queue: .main) {
+            guard !finished else { return }
+            finished = true
+            completion(reason)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard !finished else { return }
+            finished = true
+            completion(reason)
+        }
+    }
 
     /// Applies this site's saved page zoom (100% if none).
     func applyZoom() {
@@ -575,6 +768,10 @@ extension Tab: WKNavigationDelegate {
             load(url)
             return
         }
+        if isWarmingUp && DownloadManager.shouldDownload(navigationResponse) {
+            decisionHandler(.cancel)
+            return
+        }
         decisionHandler(DownloadManager.shouldDownload(navigationResponse) ? .download : .allow)
     }
 
@@ -589,20 +786,28 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if discardingBlank { return }
         userChainActive = false
-        savedTitle = nil
         applyZoom()
+        if isRestoring {
+            // The page is on its way; hand over from the saved picture shortly.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.endRestoring() }
+        }
         MediaPlayback.shared.tabDidLeavePage(self)
         if let url = webView.url, url.scheme == "http" || url.scheme == "https" { lastKnownURL = url }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         userChainActive = false
+        endRestoring()
+        settleLoad()
         logNavigationError(error, stage: "Provisional navigation")
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         userChainActive = false
+        endRestoring()
+        settleLoad()
         logNavigationError(error, stage: "Navigation")
     }
 
@@ -649,6 +854,9 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if discardingBlank { discardingBlank = false; return }
+        savedTitle = nil
+        endRestoring()
         CookieGuard.shared.spoofAnalyticsCookies(in: webView.configuration.websiteDataStore.httpCookieStore)
         applyZoom()
         loadFavicon()
@@ -658,7 +866,9 @@ extension Tab: WKNavigationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.samplePageBackground() }
         detectManifest()
         delegate?.tabDidChange(self)
-        NotificationCenter.default.post(name: Tab.didFinishPageLoad, object: self)
+        // Pages loaded only to be pictured stay quiet: no automations run.
+        if !isWarmingUp { NotificationCenter.default.post(name: Tab.didFinishPageLoad, object: self) }
+        settleLoad()
     }
 
     /// Posted (object: the Tab) whenever a page finishes loading — used to
@@ -768,6 +978,7 @@ extension Tab: WKNavigationDelegate {
         // iOS kills a tab's web content process under memory pressure (or on
         // a WebKit crash); webView.url is often already nil by now, so fall
         // back to the last page we saw.
+        if isDeferred { return }
         let target = webView.url ?? lastKnownURL
         AppLog.shared.log("Web content process terminated (\(isTor ? "Tor" : "normal") tab) for \(target?.absoluteString ?? "blank tab") — restoring", category: "nav")
         if webView.url != nil {
@@ -871,6 +1082,7 @@ extension Tab: WKUIDelegate {
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if isWarmingUp { return nil }
         guard let url = action.request.url, let destHost = url.host else { return nil }
 
         // WebKit normally only calls this delegate method when there's no
@@ -1002,6 +1214,7 @@ extension Tab: WKUIDelegate {
     /// mid-presentation) so the caller answers WebKit immediately — WebKit
     /// throws if a dialog's completion handler is never called.
     private func presentDialog(_ alert: UIAlertController) -> Bool {
+        if isWarmingUp { return false }
         guard var presenter = delegate?.presenter(for: self) else { return false }
         while let presented = presenter.presentedViewController, !presented.isBeingDismissed { presenter = presented }
         guard !presenter.isBeingDismissed, presenter.viewIfLoaded?.window != nil,

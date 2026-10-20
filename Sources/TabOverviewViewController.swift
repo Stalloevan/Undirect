@@ -102,7 +102,9 @@ final class TabOverviewViewController: UIViewController, UICollectionViewDataSou
     /// snapshot when there is one (placeholder otherwise — see the cell).
     private func captureThumbnails() {
         for (index, tab) in tabs.enumerated() {
-            if let url = tab.url, let snap = tab.historySnapshot(for: url) {
+            if let saved = TabSnapshotStore.shared.image(for: tab.id) {
+                thumbnails[tab.id] = saved
+            } else if let url = tab.url, let snap = tab.historySnapshot(for: url) {
                 thumbnails[tab.id] = snap
             }
             if index == initialSelected, tab.webView.superview != nil {
