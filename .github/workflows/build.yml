@@ -30,6 +30,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Ad-block regression tests
+        run: python3 Tools/adblock-test/run.py
+
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_26.2.app
 

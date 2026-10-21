@@ -55,12 +55,24 @@ final class ContentBlocker {
         "us-assets.i.posthog.com", "app.posthog.com"
     ]
 
-    private static let blockedScriptPatterns = [
-        "/pagead\\.js", "/ads\\.js", "/widget/ads\\.", "/ad-loader\\.js", "/ad-manager\\.js"
-    ]
+    private static func resourceData(_ name: String) -> Data? {
+        Bundle.main.url(forResource: name, withExtension: "txt").flatMap { try? Data(contentsOf: $0) }
+    }
+
+    /// Ad/tracker hosts the big lists leave out, and URL patterns (ad loaders
+    /// served from any site, tracking pixels on otherwise-useful hosts). These
+    /// live in bundled text files so Tools/adblock-test checks the very same
+    /// data the app ships.
+    private static let extraDomains: [String] = resourceData("blocklist-extra").map(ContentBlocker.parseDomains) ?? []
+    private static let extraURLFilters: [String] = {
+        guard let data = resourceData("blocklist-extra-urls") else { return [] }
+        return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+    }()
 
     /// Bump when the JSON *format* produced below changes.
-    private static let rulesFormat = "r2"
+    private static let rulesFormat = "r3"
 
     /// Cache keys come from the content itself, not the build number, so an
     /// app update that doesn't touch the lists reuses the already-compiled
@@ -75,8 +87,23 @@ final class ContentBlocker {
     }
 
     private static let staticRulesKey: String = contentKey(
-        cosmeticSelectors.joined() + shieldDomains.joined() + blockedScriptPatterns.joined()
+        cosmeticSelectors.joined() + shieldDomains.joined() + extraURLFilters.joined(separator: "\n")
+            + extraDomains.joined(separator: "\n")
     )
+
+    /// `a` covers `b` when it is `b` or one of its parent domains.
+    private static func covers(_ a: String, _ b: String) -> Bool { b == a || b.hasSuffix("." + a) }
+
+    /// A list entry the person has chosen to allow (an allowed name drops the
+    /// entries above it and below it).
+    private static func isExcluded(_ entry: String, by allowed: [String]) -> Bool {
+        allowed.contains { covers($0, entry) || covers(entry, $0) }
+    }
+
+    private static func shortHash(_ strings: [String]) -> String {
+        let digest = SHA256.hash(data: Data(strings.sorted().joined(separator: ",").utf8))
+        return digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+    }
 
     /// Returns true if `host` or any parent domain is on the active list.
     func isBlocked(host: String?) -> Bool {
@@ -144,6 +171,8 @@ final class ContentBlocker {
         let cosmetic = Settings.shared.cosmeticFiltering
         let cookies = Settings.shared.blockThirdPartyCookies
         let shields = Settings.shared.blockIPLookups
+        let userBlocked = UserBlocklist.shared.blocked
+        let userAllowed = UserBlocklist.shared.allowed
         isCompiling = true
         if gen == 1 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
@@ -177,15 +206,33 @@ final class ContentBlocker {
                 UserDefaults.standard.set(chunkCount, forKey: countKey)
             }
 
+            // Domains the person allowed: dropped from the chunk that holds
+            // them (only that chunk is recompiled; the rest stay cached).
+            let listDomains = list?.domains ?? []
+            var excludedByChunk: [Int: [String]] = [:]
+            var excluded = Set<String>()
+            if !userAllowed.isEmpty {
+                for (i, d) in listDomains.enumerated() where Self.isExcluded(d, by: userAllowed) {
+                    excludedByChunk[i / Self.chunkSize, default: []].append(d)
+                    excluded.insert(d)
+                }
+            }
+            let extras = level == .off ? [] : Self.extraDomains
+            let keptExtras = extras.filter { !Self.isExcluded($0, by: userAllowed) }
+            let keptShields = Self.shieldDomains.filter { !Self.isExcluded($0, by: userAllowed) }
+            let excludedSet = excluded
+            let allowedTag = userAllowed.isEmpty ? "" : "-x" + Self.shortHash(userAllowed)
+
             // Each spec: identifier + a closure producing its JSON (only built,
             // off the main thread, if WebKit doesn't have it cached).
             var specs: [(String, () -> String)] = []
             for index in 0..<chunkCount {
-                specs.append(("undirect-\(level.rawValue)-\(index)-b\(version)", {
-                    let all = list?.domains ?? []
-                    let start = min(index * Self.chunkSize, all.count)
-                    let end = min(start + Self.chunkSize, all.count)
-                    return Self.domainRulesJSON(all[start..<end])
+                let tag = excludedByChunk[index].map { "-x" + Self.shortHash($0) } ?? ""
+                specs.append(("undirect-\(level.rawValue)-\(index)-b\(version)\(tag)", {
+                    let start = min(index * Self.chunkSize, listDomains.count)
+                    let end = min(start + Self.chunkSize, listDomains.count)
+                    let slice = listDomains[start..<end]
+                    return Self.domainRulesJSON(excludedSet.isEmpty ? Array(slice) : slice.filter { !excludedSet.contains($0) })
                 }))
             }
             let fixed = Self.staticRulesKey
@@ -193,13 +240,18 @@ final class ContentBlocker {
                 specs.append(("undirect-cosmetic-b\(fixed)", { Self.cosmeticJSON() }))
             }
             if level != .off {
-                specs.append(("undirect-scriptpatterns-b\(fixed)", { Self.scriptPatternJSON() }))
+                specs.append(("undirect-extra-b\(fixed)\(allowedTag)", { Self.domainRulesJSON(keptExtras) }))
+                specs.append(("undirect-urlfilters-b\(fixed)", { Self.urlFilterJSON() }))
             }
             if shields {
-                specs.append(("undirect-shields-b\(fixed)", { Self.shieldJSON() }))
+                specs.append(("undirect-shields-b\(fixed)\(allowedTag)", { Self.shieldJSON(keptShields) }))
             }
             if cookies {
                 specs.append(("undirect-3pcookies-b\(fixed)", { Self.thirdPartyCookieJSON() }))
+            }
+            // The person's own blocks apply whatever the level, even Off.
+            if !userBlocked.isEmpty {
+                specs.append(("undirect-user-b\(Self.contentKey(userBlocked.joined(separator: "\n")))", { Self.domainRulesJSON(userBlocked) }))
             }
 
             DispatchQueue.main.async {
@@ -208,7 +260,10 @@ final class ContentBlocker {
             }
             // In parallel: the domain set for blocking ad/tracker sites you'd
             // otherwise be sent to as a whole page.
-            let set = Set(list?.domains ?? [])
+            var set = Set(listDomains)
+            if !excluded.isEmpty { set.subtract(excluded) }
+            set.formUnion(keptExtras)
+            set.formUnion(userBlocked)
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
                 self.blockedDomains = set
@@ -300,6 +355,8 @@ final class ContentBlocker {
             for id in ids ?? [] where id.hasPrefix("undirect-") && !keeping.contains(id) {
                 // Keep other blocklist levels in the current format cached so
                 // switching back is instant; drop everything older.
+                // The person's own lists and allow-list variants change often; drop them once unused.
+                if id.hasPrefix("undirect-user-") || id.contains("-x") { store.removeContentRuleList(forIdentifier: id) { _ in }; continue }
                 if id.contains("-b\(Self.rulesFormat)-") { continue }
                 store.removeContentRuleList(forIdentifier: id) { _ in }
             }
@@ -315,7 +372,7 @@ final class ContentBlocker {
 
     // MARK: JSON builders
 
-    private static func domainRulesJSON(_ domains: ArraySlice<String>) -> String {
+    private static func domainRulesJSON(_ domains: [String]) -> String {
         var s = "["
         s.reserveCapacity(domains.count * 100)
         var first = true
@@ -339,24 +396,23 @@ final class ContentBlocker {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// Blocks by filename/path regardless of domain — catches ad-loader
-    /// scripts served from a site's own origin (which a domain list alone
-    /// can't see) such as the decoy `ads.js` / `pagead.js` ad-blocker test
-    /// pages serve from themselves specifically to check for this.
-    private static func scriptPatternJSON() -> String {
+    /// Blocks by URL pattern regardless of domain — ad-loader scripts served
+    /// from a site's own origin (such as the decoy `ads.js` / `pagead.js`
+    /// ad-blocker test pages serve) and tracking pixels on useful hosts.
+    private static func urlFilterJSON() -> String {
         // Built with a real JSON encoder: the patterns contain regex escapes
         // like `\.`, which aren't valid JSON escapes if pasted in raw — that
         // made WebKit reject this whole list (WKErrorDomain 6) before.
-        let rules: [[String: Any]] = blockedScriptPatterns.map { pattern in
+        let rules: [[String: Any]] = extraURLFilters.map { pattern in
             ["trigger": ["url-filter": pattern], "action": ["type": "block"]]
         }
         let data = (try? JSONSerialization.data(withJSONObject: rules)) ?? Data("[]".utf8)
         return String(decoding: data, as: UTF8.self)
     }
 
-    private static func shieldJSON() -> String {
+    private static func shieldJSON(_ domains: [String]) -> String {
         let types = ["raw", "script", "image", "style-sheet", "font", "media", "other"]
-        let rules: [[String: Any]] = shieldDomains.map { domain in
+        let rules: [[String: Any]] = domains.map { domain in
             let escaped = domain.replacingOccurrences(of: ".", with: "\\.")
             return [
                 "trigger": ["url-filter": "^[^:]+://+([^:/]+\\.)?\(escaped)[:/]", "resource-type": types],

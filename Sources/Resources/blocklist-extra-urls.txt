@@ -1,0 +1,15 @@
+# URL patterns (WebKit content-rule url-filter syntax) for trackers that live
+# on hosts too useful to block outright, and ad scripts any site can serve.
+# One pattern per line. Tested by Tools/adblock-test.
+^[^:]+://+connect\.facebook\.net/[^/]+/fbevents\.js
+^[^:]+://+([^:/]+\.)?facebook\.com/tr[/?]
+^[^:]+://+graph\.facebook\.com/[^/]+/activities
+^[^:]+://+s\.pinimg\.com/ct/
+^[^:]+://+www\.redditstatic\.com/ads/
+/pagead\.js$
+/pagead\.js[?#]
+/ads\.js$
+/ads\.js[?#]
+/widget/ads\.
+/ad-loader\.js
+/ad-manager\.js

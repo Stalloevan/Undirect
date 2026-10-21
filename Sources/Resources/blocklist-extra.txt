@@ -1,0 +1,29 @@
+# Tracker/ad hosts the HaGeZi lists leave out (found by Tools/adblock-test).
+# One domain per line; subdomains are blocked too. Only hosts that exist to
+# serve ads or tracking belong here, since they also block page navigation.
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+googletagservices.com
+googletagmanager.com
+google-analytics.com
+adsrvr.org
+scorecardresearch.com
+amazon-adsystem.com
+bluekai.com
+rubiconproject.com
+optimizely.com
+segment.io
+cdn.segment.com
+hs-scripts.com
+hs-analytics.net
+ads.reddit.com
+alb.reddit.com
+ct.pinterest.com
+analytics.twitter.com
+static.ads-twitter.com
+snap.licdn.com
+ads.linkedin.com
+udc.yahoo.com
+bat.r.msn.com
+analytics.tiktok.com

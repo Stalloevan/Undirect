@@ -127,6 +127,7 @@ final class SettingsViewController: SettingsTableViewController {
                 SettingsRow(title: "Remove link tracking", kind: .toggle(get: { s.stripTrackers }, set: { s.stripTrackers = $0 })),
                 SettingsRow(title: "Skip video ads", kind: .toggle(get: { s.skipVideoAds }, set: { s.skipVideoAds = $0 })),
                 SettingsRow(title: "Click through redirect layers", kind: .toggle(get: { s.clickThrough }, set: { s.clickThrough = $0 })),
+                SettingsRow(title: "Custom blocklist", kind: .push({ CustomBlocklistViewController() })),
                 SettingsRow(title: "Site exceptions (trusted & paused)", kind: .push({ SiteExceptionsViewController() })),
                 SettingsRow(title: "Hidden elements", kind: .push({ HiddenElementsViewController() }))
             ]),
