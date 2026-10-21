@@ -1,0 +1,34 @@
+# Blocked only as things a page loads (scripts, pixels, requests, images, fonts,
+# media) — never as a page you open or a frame. For hosts that are also
+# dashboards, link-redirect hops or consent services, where blocking the
+# destination itself would strand you. One domain per line; subdomains included.
+ads.microsoft.com
+tagmanager.google.com
+ads.x.com
+ads.huawei.com
+s.youtube.com
+eu.posthog.com
+analytics.pinterest.com
+widgets.pinterest.com
+widget.intercom.io
+appsflyer.com
+app.adjust.com
+bnc.lt
+kochava.com
+partnerstack.com
+click.mailchimp.com
+anrdoezrs.net
+dpbolvw.net
+tkqlhce.com
+shareasale.com
+awin1.com
+zenaps.com
+prf.hn
+t.pepperjamnetwork.com
+skimresources.com
+go.redirectingat.com
+redirect.viglink.com
+mssl.fwmrm.net
+geolocation.onetrust.com
+privacyportal.onetrust.com
+fundingchoicesmessages.google.com

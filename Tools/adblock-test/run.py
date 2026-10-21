@@ -2,7 +2,7 @@
 """Ad-block regression test. Exit status 1 if any expectation fails."""
 import sys, random, re
 from harness import *
-from corpus import SHOULD_BLOCK, SHOULD_ALLOW
+from corpus import *
 
 failures = 0
 def fail(msg):
@@ -52,6 +52,30 @@ if sub.verdict('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js')
 both = Rules('strict', user_blocked=['doubleclick.net'], user_allowed=['doubleclick.net'])
 if not both.verdict('https://doubleclick.net/'): fail('user block should win over a list removal')
 print('[user lists] ok' if not failures else '[user lists] see failures')
+
+# 5. The v3.39 additions.
+rules = Rules('strict')
+for h in REQUESTED_FULL:
+    for t in ('script', 'document'):
+        if not rules.verdict(f'https://{h}/x', t): fail(f'{h} not blocked as {t}')
+for h in REQUESTED_RESOURCE_ONLY:
+    for t in ('script', 'raw', 'image'):
+        if not rules.verdict(f'https://{h}/x', t): fail(f'{h} not blocked as {t}')
+    for t in ('document', 'frame'):
+        if rules.verdict(f'https://{h}/x', t): fail(f'{h} wrongly blocked as {t} (would strand the page)')
+for h in REQUESTED_LEFT_ALONE:
+    for t in ('script', 'document'):
+        v = rules.verdict(f'https://{h}/x', t)
+        if v: fail(f'{h} should load as {t} but is blocked ({v})')
+for u in PATH_BLOCKED:
+    if not rules.verdict(u, 'script'): fail(f'tracking path not blocked: {u}')
+for u, t in PATH_ALLOWED:
+    if rules.verdict(u, t): fail(f'wrongly blocked: {u} ({t})')
+# Level Off blocks none of it; a user "allow" lifts a resource-only entry too.
+off = Rules('off')
+if off.verdict('https://criteo.com/x') or off.verdict('https://s.youtube.com/x'): fail('level Off should not block built-in extras')
+if Rules('strict', user_allowed=['s.youtube.com']).verdict('https://s.youtube.com/api/stats', 'raw'): fail('allowing s.youtube.com did not lift it')
+print(f'[v3.39] {len(REQUESTED_FULL)} full, {len(REQUESTED_RESOURCE_ONLY)} resource-only, {len(REQUESTED_LEFT_ALONE)} left alone')
 
 print('PASS' if not failures else f'{failures} FAILURE(S)')
 sys.exit(1 if failures else 0)

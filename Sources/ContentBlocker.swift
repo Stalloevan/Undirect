@@ -64,6 +64,8 @@ final class ContentBlocker {
     /// live in bundled text files so Tools/adblock-test checks the very same
     /// data the app ships.
     private static let extraDomains: [String] = resourceData("blocklist-extra").map(ContentBlocker.parseDomains) ?? []
+    /// Hosts blocked only as page resources, never as a page or frame you open.
+    private static let extraResourceDomains: [String] = resourceData("blocklist-extra-resources").map(ContentBlocker.parseDomains) ?? []
     private static let extraURLFilters: [String] = {
         guard let data = resourceData("blocklist-extra-urls") else { return [] }
         return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
@@ -88,7 +90,7 @@ final class ContentBlocker {
 
     private static let staticRulesKey: String = contentKey(
         cosmeticSelectors.joined() + shieldDomains.joined() + extraURLFilters.joined(separator: "\n")
-            + extraDomains.joined(separator: "\n")
+            + extraDomains.joined(separator: "\n") + extraResourceDomains.joined(separator: "\n")
     )
 
     /// `a` covers `b` when it is `b` or one of its parent domains.
@@ -219,6 +221,7 @@ final class ContentBlocker {
             }
             let extras = level == .off ? [] : Self.extraDomains
             let keptExtras = extras.filter { !Self.isExcluded($0, by: userAllowed) }
+            let keptResourceOnly = (level == .off ? [] : Self.extraResourceDomains).filter { !Self.isExcluded($0, by: userAllowed) }
             let keptShields = Self.shieldDomains.filter { !Self.isExcluded($0, by: userAllowed) }
             let excludedSet = excluded
             let allowedTag = userAllowed.isEmpty ? "" : "-x" + Self.shortHash(userAllowed)
@@ -241,6 +244,7 @@ final class ContentBlocker {
             }
             if level != .off {
                 specs.append(("undirect-extra-b\(fixed)\(allowedTag)", { Self.domainRulesJSON(keptExtras) }))
+                specs.append(("undirect-extrares-b\(fixed)\(allowedTag)", { Self.shieldJSON(keptResourceOnly) }))
                 specs.append(("undirect-urlfilters-b\(fixed)", { Self.urlFilterJSON() }))
             }
             if shields {

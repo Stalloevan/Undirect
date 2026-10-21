@@ -13,3 +13,6 @@
 /widget/ads\.
 /ad-loader\.js
 /ad-manager\.js
+^[^:]+://+([^:/]+\.)?vk\.com/rtrg
+^[^:]+://+connect\.facebook\.net/signals/
+^[^:]+://+connect\.facebook\.net/[^/]+/fbds\.js

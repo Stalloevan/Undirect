@@ -180,3 +180,35 @@ https://www.msn.com/
 https://www.twitter.com/home
 https://help.yahoo.com/
 """.split()
+
+
+# Added in v3.39 -----------------------------------------------------------
+# Blocked everywhere (ads, verification, pop-unders, telemetry, SDK endpoints).
+REQUESTED_FULL = """fls-na.amazon.com criteo.com mgid.com propellerads.com applovin.com api.vungle.com pubmatic.com
+live.chartboost.com contextweb.com stackadapt.com pangleglobal.com doubleverify.com pixel.adsafeprotected.com
+static.adsafeprotected.com insightexpressai.com rs.fullstory.com cdn.siftscience.com bcp.crwdcntrl.net
+sync-tm.everesttech.net o0.ingest.sentry.io browser-intake-datadoghq.com rum.browser-intake-datadoghq.com popads.net
+popcash.net clickadu.com exoclick.com juicyads.com xp.apple.com ngfts.lge.com vortex.data.microsoft.com
+firebase-settings.crashlytics.com cdn.dynamicyield.com st.dynamicyield.com events.launchdarkly.com
+clientstream.launchdarkly.com sdk.iad-01.braze.com cdn.onesignal.com api.onesignal.com static.klaviyo.com a.klaviyo.com
+track.customer.io cd.connatix.com capi.connatix.com vid.connatix.com s.innovid.com prd.jwpltx.com""".split()
+
+# Blocked as page resources only; opening them (or framing them) must still work.
+REQUESTED_RESOURCE_ONLY = """ads.microsoft.com tagmanager.google.com ads.x.com ads.huawei.com s.youtube.com eu.posthog.com
+analytics.pinterest.com widgets.pinterest.com widget.intercom.io appsflyer.com app.appsflyer.com app.adjust.com bnc.lt
+kochava.com control.kochava.com partnerstack.com api.partnerstack.com click.mailchimp.com www.anrdoezrs.net www.dpbolvw.net
+www.tkqlhce.com shareasale.com www.awin1.com zenaps.com prf.hn t.pepperjamnetwork.com go.skimresources.com
+redirector.skimresources.com go.redirectingat.com redirect.viglink.com mssl.fwmrm.net geolocation.onetrust.com
+privacyportal.onetrust.com fundingchoicesmessages.google.com""".split()
+
+# Requested but deliberately NOT blocked: blocking them breaks video playback,
+# logins, embeds, or the cookie-banner handling. Must load as script AND as page.
+REQUESTED_LEFT_ALONE = """redirector.googlevideo.com dai.google.com ssl.p.jwpcdn.com connect.facebook.net graph.facebook.com
+graph.instagram.com i.instagram.com consent.cookiebot.com consentcdn.cookiebot.com consent.trustarc.com sdk.privacy-center.org
+cdn.privacy-mgmt.com app.usercentrics.eu cmp.inmobi.com cmp.osano.com quantcast.com""".split()
+
+# Facebook/Instagram/VK tracking is blocked by path; the rest of those hosts keeps working.
+PATH_BLOCKED = ["https://connect.facebook.net/signals/config/123", "https://connect.facebook.net/en_US/fbds.js",
+                "https://vk.com/rtrg?p=VK-RTRG-1", "https://vk.com/rtrg"]
+PATH_ALLOWED = [("https://vk.com/feed", "document"), ("https://vk.com/id1", "document"), ("https://vk.com/js/api/openapi.js", "script"),
+                ("https://connect.facebook.net/en_US/sdk.js", "script"), ("https://graph.facebook.com/v18.0/me?access_token=x", "raw")]

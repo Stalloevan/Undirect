@@ -49,11 +49,13 @@ class Rules:
         self.domains = [e for e in base if keep(e)]
         self.domain_rules = [domain_re(d) for d in self.domains] if len(self.domains) < 3000 else None
         self.domset = set(self.domains)
+        res = [] if level == 'off' else parse_domains(R + 'blocklist-extra-resources.txt')
+        self.resource_only = [domain_re(d) for d in res if not any(covers(d, a) or covers(a, d) for a in self.user_allowed)]
         self.urls = [] if level == 'off' else [re.compile(p, re.I) for p in parse_lines(R + 'blocklist-extra-urls.txt')]
         self.user_rules = [domain_re(d) for d in self.user_blocked]
         self.shield = [domain_re(d) for d in SHIELD if not any(covers(d, a) or covers(a, d) for a in self.user_allowed)]
 
-    def verdict(self, url):
+    def verdict(self, url, rtype='script'):
         u = canon(url)
         m = re.match(r'^[^:]+://+([^:/]+)', u)
         host = (m.group(1) if m else '').lower()
@@ -66,6 +68,8 @@ class Rules:
             if r.search(u): return 'user:' + r.pattern
         for r in self.urls:
             if r.search(u): return 'url:' + r.pattern
-        for r in self.shield:
-            if r.search(u): return 'shield:' + r.pattern
+        if rtype in ('document', 'frame'):  # navigations and frames are never hit by resource-only rules
+            return None
+        for r in self.resource_only + self.shield:
+            if r.search(u): return 'resource:' + r.pattern
         return None
