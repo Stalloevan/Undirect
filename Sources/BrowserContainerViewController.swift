@@ -170,6 +170,10 @@ final class BrowserContainerViewController: UIViewController {
         restoreSession()
         sessionRestored = true
         lifecycle.start()
+        // Remove storage left behind by tabs that no longer exist (after a crash or a force-quit).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            SiteSandbox.collectGarbage(openTabIDs: { Set(self?.tabs.map(\.id) ?? []) })
+        }
         // The tab on screen loads first; the others follow once it is done.
         lifecycle.armWarmUp()
         LocalFiles.prune(keeping: tabs.compactMap { $0.url })
@@ -202,6 +206,8 @@ final class BrowserContainerViewController: UIViewController {
     /// their content processes under pressure, but our own caches go too.
     @objc private func handleMemoryWarning() {
         for tab in tabs where tab !== currentTab { tab.dropCaches() }
+        // Save what kept sites need (logins, Cloudflare clearance) out of the private tabs.
+        for tab in tabs { tab.syncKeptCookies() }
         lifecycle.appDidEnterBackground()
     }
 
@@ -713,9 +719,9 @@ final class BrowserContainerViewController: UIViewController {
             // of the work and memory, and the visible page gets the network.
             for saved in session.tabs {
                 let isTor = saved.tor ?? false
-                let tab = makeTab(tor: isTor, id: saved.id)
-                tab.stackID = saved.stack.flatMap(UUID.init(uuidString:))
                 let url = saved.url.flatMap(URL.init(string:))
+                let tab = makeTab(tor: isTor, id: saved.id, startURL: url)
+                tab.stackID = saved.stack.flatMap(UUID.init(uuidString:))
                 tab.deferRestore(state: url == nil ? nil : saved.state, url: url, title: saved.title)
                 tabs.append(tab)
             }
@@ -759,9 +765,10 @@ final class BrowserContainerViewController: UIViewController {
         }
     }
 
-    private func makeTab(tor: Bool, id: UUID = UUID(), popupConfiguration: WKWebViewConfiguration? = nil) -> Tab {
+    private func makeTab(tor: Bool, id: UUID = UUID(), popupConfiguration: WKWebViewConfiguration? = nil,
+                         startURL: URL? = nil) -> Tab {
         if tor { TorManager.shared.ensureRunning() }
-        let tab = Tab(isTor: tor, popupConfiguration: popupConfiguration, id: id)
+        let tab = Tab(isTor: tor, popupConfiguration: popupConfiguration, id: id, startHost: startURL?.host)
         tab.delegate = self
         return tab
     }
@@ -769,7 +776,7 @@ final class BrowserContainerViewController: UIViewController {
     @discardableResult
     func openTab(url: URL?, tor: Bool? = nil, select: Bool = true) -> Tab {
         let isOnion = url?.host?.lowercased().hasSuffix(".onion") ?? false
-        let tab = makeTab(tor: isOnion || (tor ?? Settings.shared.torForNewTabs))
+        let tab = makeTab(tor: isOnion || (tor ?? Settings.shared.torForNewTabs), startURL: url)
         let insertAt = min(selectedIndex + 1, tabs.count)
         tabs.insert(tab, at: insertAt)
         if let url { tab.load(url) }
@@ -800,6 +807,9 @@ final class BrowserContainerViewController: UIViewController {
         tab.webView.stopLoading()
         tab.webView.removeFromSuperview()
         tabs.remove(at: index)
+        tab.retireSandbox(sharedWithOtherTab: tab.sandboxSiteBase.map { base in
+            tabs.contains { $0.sandboxSiteBase == base }
+        } ?? false)
 
         if tabs.isEmpty {
             tabs.append(makeTab(tor: Settings.shared.torForNewTabs))
@@ -1075,10 +1085,11 @@ final class BrowserContainerViewController: UIViewController {
     private func toggleTor() {
         guard let old = currentTab, let index = tabs.firstIndex(where: { $0 === old }) else { return }
         let url = old.url
-        let tab = makeTab(tor: !old.isTor)
+        let tab = makeTab(tor: !old.isTor, startURL: url)
         old.webView.stopLoading()
         old.webView.removeFromSuperview()
         tabs[index] = tab
+        old.retireSandbox(sharedWithOtherTab: old.sandboxSiteBase.map { base in tabs.contains { $0.sandboxSiteBase == base } } ?? false)
         if let url { tab.load(url) }
         showCurrentTab()
         showToast(tab.isTor ? "This tab now uses Tor" : "Tor off for this tab")
@@ -1089,10 +1100,11 @@ final class BrowserContainerViewController: UIViewController {
     private func cancelTorWaitOnCurrentTab() {
         guard let old = currentTab, old.isWaitingForTor, let index = tabs.firstIndex(where: { $0 === old }) else { return }
         let url = old.url
-        let tab = makeTab(tor: false)
+        let tab = makeTab(tor: false, startURL: url)
         old.webView.stopLoading()
         old.webView.removeFromSuperview()
         tabs[index] = tab
+        old.retireSandbox(sharedWithOtherTab: false)
         if let url { tab.load(url) }
         showCurrentTab()
         showToast("Loading without Tor")

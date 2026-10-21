@@ -16,7 +16,7 @@ final class StandalonePWAViewController: UIViewController {
 
     init(pwa: InstalledPWA) {
         self.pwa = pwa
-        self.pwaTab = Tab(isTor: false)
+        self.pwaTab = Tab(isTor: false, dataStore: SiteSandbox.appStore(pwa.id))
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }

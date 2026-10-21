@@ -85,11 +85,7 @@ final class CookieGuard {
     }
 
     func clearEverything(completion: @escaping () -> Void) {
-        WKWebsiteDataStore.default().removeData(
-            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-            modifiedSince: .distantPast,
-            completionHandler: completion
-        )
+        SiteSandbox.clearAll(completion: completion)
     }
 
     private static func randomString(length: Int) -> String {

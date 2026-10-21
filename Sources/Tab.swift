@@ -138,21 +138,58 @@ final class Tab: NSObject {
         "is.gd", "dlvr.it", "fb.me", "amzn.to", "spoti.fi", "apple.co", "youtu.be", "g.co", "trib.al"
     ]
 
-    init(isTor: Bool, popupConfiguration: WKWebViewConfiguration? = nil, id: UUID = UUID()) {
+    /// How this tab's storage is kept apart from every other site (see SiteSandbox).
+    enum Sandbox {
+        case privateTab            // its own storage, deleted when the tab closes
+        case savedSite(String)     // the saved store of a kept-login / cleared site
+        case installedApp          // an installed web app's own saved store
+        case tor                   // its own in-memory storage, through Tor
+        case popup                 // shares its opener's storage
+    }
+
+    let sandbox: Sandbox
+    /// Random for this tab only: seeds the fingerprint noise.
+    let fingerprintSeed: UInt32
+
+    var sandboxSiteBase: String? {
+        if case .savedSite(let base) = sandbox { return base }
+        return nil
+    }
+
+    /// `startHost` is where the tab begins; it picks the saved store for a kept site.
+    /// `dataStore` is for installed web apps, which keep their own storage.
+    init(isTor: Bool, popupConfiguration: WKWebViewConfiguration? = nil, id: UUID = UUID(),
+         startHost: String? = nil, dataStore: WKWebsiteDataStore? = nil) {
         self.id = id
         self.isTor = isTor
         self.isPopup = popupConfiguration != nil
+        let seed = UInt32.random(in: 1...UInt32.max)
+        self.fingerprintSeed = seed
+        var store = dataStore
+        if popupConfiguration != nil {
+            sandbox = .popup
+        } else if isTor {
+            sandbox = .tor
+        } else if dataStore != nil {
+            sandbox = .installedApp
+        } else if let base = SiteSandbox.persistentBase(forHost: startHost) {
+            sandbox = .savedSite(base)
+            store = SiteSandbox.siteStore(base)
+        } else {
+            sandbox = .privateTab
+            store = SiteSandbox.tabStore(id)
+        }
         let name = "undirect_" + String(UUID().uuidString.prefix(8))
         self.messageName = name
         let proxy = ScriptMessageProxy()
         self.messageProxy = proxy
 
-        let config = popupConfiguration ?? WebEngine.makeConfiguration(tor: isTor)
+        let config = popupConfiguration ?? WebEngine.makeConfiguration(tor: isTor, store: store)
         if popupConfiguration == nil {
             // Unique per-tab name: re-registering a fixed name on a shared
             // controller is what crashed v1.2.
             config.userContentController.add(proxy, contentWorld: .defaultClient, name: name)
-            WebEngine.installScripts(on: config.userContentController, messageName: name, tor: isTor)
+            WebEngine.installScripts(on: config.userContentController, messageName: name, tor: isTor, seed: seed)
         }
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
@@ -522,11 +559,33 @@ final class Tab: NSObject {
         if abs(webView.pageZoom - zoom) > 0.001 { webView.pageZoom = zoom }
     }
 
+    var dataStore: WKWebsiteDataStore { webView.configuration.websiteDataStore }
+
+    /// Kept sites whose saved login this private tab has already been given.
+    fileprivate var restoredBases = Set<String>()
+
+    /// Called when the tab closes: deletes its private storage (after saving
+    /// what a kept site needs), or tidies a saved site store.
+    func retireSandbox(sharedWithOtherTab: Bool) {
+        switch sandbox {
+        case .privateTab, .savedSite:
+            SiteSandbox.retire(store: dataStore, tabID: id, siteBase: sandboxSiteBase, stillShared: sharedWithOtherTab)
+        case .installedApp, .tor, .popup:
+            break
+        }
+    }
+
+    /// Copies cookies for kept sites out of a private tab into the site's saved store.
+    func syncKeptCookies() {
+        guard case .privateTab = sandbox else { return }
+        SiteSandbox.syncKept(from: dataStore)
+    }
+
     func reinstallScripts() {
         guard !isPopup else { return }
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
-        WebEngine.installScripts(on: controller, messageName: messageName, tor: isTor)
+        WebEngine.installScripts(on: controller, messageName: messageName, tor: isTor, seed: fingerprintSeed)
         if let recorderScript { controller.addUserScript(recorderScript) }
     }
 
@@ -565,6 +624,8 @@ final class Tab: NSObject {
                   !CookieGuard.shared.keptLogins.contains(host: host) else { return }
             CookieGuard.shared.keptLogins.add(host: host)
             delegate?.tab(self, toast: "Keeping you logged in on \(DomainUtil.baseDomain(host))")
+            // Give the login a few seconds to finish setting its cookies, then save them.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.syncKeptCookies() }
 
         case "failed":
             let hosts = (body["hosts"] as? [String]) ?? []
@@ -672,6 +733,19 @@ extension Tab: WKNavigationDelegate {
 
         let isMainFrame = action.targetFrame?.isMainFrame ?? true
         guard isMainFrame else { decisionHandler(proceed); return }
+
+        // A private tab heading to a kept site (a saved login or Cloudflare
+        // clearance) first receives that site's saved cookies, then the same
+        // decision is made again.
+        if case .privateTab = sandbox, let base = SiteSandbox.persistentBase(forHost: url.host),
+           !restoredBases.contains(base) {
+            restoredBases.insert(base)
+            SiteSandbox.restoreKept(base: base, into: dataStore) { [weak self] in
+                guard let self else { decisionHandler(.cancel); return }
+                self.webView(webView, decidePolicyFor: action, decisionHandler: decisionHandler)
+            }
+            return
+        }
 
         // Standalone PWA: a main-frame navigation out of the app's scope is
         // handed to the normal browser instead of loading in the app window.

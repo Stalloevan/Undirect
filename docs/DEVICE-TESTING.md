@@ -1,47 +1,60 @@
 # Device test checklist
 
-Nothing after v3.18 has been compiled or run anywhere except CI and the device
-logs you've sent back. This is the pass/fail list for the latest releases.
-Run it on the phone, mark each line, and send back any **FAIL** with a log
-export (Settings → export log). Logs are only kept in detail when something fails.
+Most changes since v3.18 have been checked only by the CI build and by logs you sent back. This list is the pass or fail test for the latest releases. Run each check on the phone and write PASS or FAIL in the Result column. For every FAIL, export the log from Settings and send it with a short note. Detailed logs are kept only when something fails.
 
-Legend: ☐ not tried · ✅ pass · ❌ fail (note what you saw)
+## Speed (v3.36)
 
-## v3.36 — speed
-| | Check | Pass if |
-|---|---|---|
-| ☐ | Cold launch with ~10 saved tabs | The visible tab appears quickly; the others don't hold up launch |
-| ☐ | Force-quit, relaunch with a Tor tab saved | Tor tab loads; log shows Tor ready sooner than before |
-| ☐ | First page load right after launch | Ads/trackers are still blocked (no ad flashes in) |
-| ☐ | Scroll a long page, open the tab sidebar | No stutter |
+| Check | Pass if | Result |
+| --- | --- | --- |
+| Cold launch with about 10 saved tabs | The visible tab appears quickly and the other tabs do not slow launch | |
+| Relaunch with a Tor tab saved | The Tor tab loads, and the log shows Tor ready sooner than before | |
+| First page load right after launch | Ads and trackers are already blocked | |
+| Scroll a long page and open the tab sidebar | No stutter | |
 
-## v3.37 — background tabs and memory
-| | Check | Pass if |
-|---|---|---|
-| ☐ | Launch with several tabs, wait ~1 min | Log: `Background tabs ready: N loaded and pictured` |
-| ☐ | Switch to a background tab | Its picture shows instantly, then the live page replaces it |
-| ☐ | Tab overview | Thumbnails show real pages, not blanks |
-| ☐ | Play a video, switch away, wait 12 min | Tab stays loaded and keeps playing; log says `Kept … (media)` |
-| ☐ | Type half a message in a form, switch away, wait 12 min | Text is still there; log says `Kept … (unsent text)` |
-| ☐ | Open ~10 tabs, leave 12+ min, return to an idle one | Log shows `Unloaded … after N min idle`; the tab reloads and shows its picture |
-| ☐ | Memory (Xcode → Debug navigator, or Settings → battery/storage) | Resident memory is clearly lower after warm-up than with all tabs live. **If not, tell me:** the next step is destroying idle web views |
-| ☐ | Settings → Load other tabs in background = Off | Other tabs don't load until opened |
-| ☐ | Tor tab in the background | Loads after the normal tabs; no leak to the open network |
-| ☐ | Close a tab mid-warm-up | No crash, no stuck spinner |
+## Background tabs and memory (v3.37)
 
-## v3.38 / v3.39 — blocking
-| | Check | Pass if |
-|---|---|---|
-| ☐ | Open a news site with heavy ads | Fewer ads and no empty-box gaps beyond what hiding already did |
-| ☐ | Settings → Custom blocklist → Block `example.org`, open it | Blocked page/failed load; remove it, page loads again |
-| ☐ | Allow a domain a list blocks (e.g. `criteo.com`) | Requests to it go through; remove it and it's blocked again |
-| ☐ | Block then Allow the same name | Newest choice wins; no duplicates in either list |
-| ☐ | Log after changing the list | `Content rules compiled: N/N lists` (N matches, nothing failed) |
-| ☐ | YouTube video plays, a Facebook login works, an Instagram profile opens | All fine (these hosts are deliberately left alone) |
-| ☐ | An email/affiliate link (click.mailchimp.com etc.) | Still reaches its destination |
-| ☐ | A site with a cookie banner | Auto-rejected as before; page not scroll-locked |
-| ☐ | https://d3ward.github.io/toolz/adblock.html | Mostly red/blocked; note any that get through → `Tools/adblock-test/add_case.py block <url>` |
+| Check | Pass if | Result |
+| --- | --- | --- |
+| Launch with several tabs and wait one minute | The log shows "Background tabs ready" | |
+| Switch to a background tab | Its picture appears at once, then the live page replaces it | |
+| Open the tab overview | Thumbnails show real pages | |
+| Play a video, switch away, wait 12 minutes | The tab stays loaded and keeps playing | |
+| Type half a message in a form, switch away, wait 12 minutes | The text is still there | |
+| Open about 10 tabs, leave them 12 minutes, return to an idle one | The log shows "Unloaded", and the tab reloads from its picture | |
+| Compare memory before and after warm-up | Memory is clearly lower after warm-up. If not, report it | |
+| Set "Load other tabs in background" to Off | Other tabs load only when opened | |
+| Close a tab while others are loading | No crash and no stuck spinner | |
 
-## Anything that looks wrong in real use
-Run `python3 Tools/adblock-test/add_case.py block <url>` (an ad got through) or
-`... allow <url>` (a site broke). That records it as a permanent regression test.
+## Blocking (v3.38 and v3.39)
+
+| Check | Pass if | Result |
+| --- | --- | --- |
+| Open a news site with many ads | Few ads and no large empty gaps | |
+| Block a domain in Custom blocklist, then open it | It does not load. After you remove it, it loads | |
+| Allow a domain that a list blocks | Its requests go through. After you remove it, it is blocked again | |
+| Block and then allow the same name | The newest choice wins and no entry is duplicated | |
+| Check the log after changing the list | It reports the same number of lists compiled as expected | |
+| Watch YouTube, log in with Facebook, open an Instagram profile | All three work | |
+| Tap an email or affiliate link | It still reaches its destination | |
+| Open a site with a cookie banner | The banner is rejected and the page still scrolls | |
+| Run the d3ward ad block test page | Most items are blocked. Report any that are not with `add_case.py block <url>` | |
+
+## Sandboxing and fingerprinting (v3.40)
+
+| Check | Pass if | Result |
+| --- | --- | --- |
+| Log in to a site in one tab, then open the same site in a second tab | The second tab is logged out | |
+| Use the browser, close the tab, and open the site again | You are logged out, unless the site is under Kept Logins | |
+| Log in to a site, accept "keeping you logged in", close the tab, open the site in a new tab | The new tab is still logged in | |
+| Open a Cloudflare protected site, pass the check, close the tab, open it again | You are not asked to verify again | |
+| Settings, Clear website data | All tabs and kept sites are logged out | |
+| Open a Tor tab and a normal tab on the same site | They do not share any login | |
+| Open an installed web app, log in, quit the app, reopen it | The web app is still logged in | |
+| Visit coveryourtracks.eff.org in two different tabs | The two tabs report different canvas and audio hashes | |
+| Use a site that measures text, such as an online editor | Layout and text wrapping look normal | |
+| Open a new blank tab, type the address of a kept login site | You are logged in (the saved cookies are copied into the new tab) | |
+| Check that the first launch after updating keeps your kept logins | Kept sites are still logged in | |
+
+## When something looks wrong in daily use
+
+Run `python3 Tools/adblock-test/add_case.py block <url>` when an ad got through, or `add_case.py allow <url>` when a site broke. The case becomes a permanent test.

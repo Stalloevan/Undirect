@@ -119,16 +119,16 @@ final class TorManager {
         pathMonitor.start(queue: workQueue)
     }
 
-    /// Shared, in-memory data store for all Tor tabs. Nothing is written to disk
-    /// and it is separate from normal browsing cookies.
-    lazy var dataStore: WKWebsiteDataStore = {
+    /// A new in-memory data store for one Tor tab. Nothing is written to disk,
+    /// and no two tabs share one, so sites cannot see each other.
+    func makeDataStore() -> WKWebsiteDataStore {
         let store = WKWebsiteDataStore.nonPersistent()
         if let port = NWEndpoint.Port(rawValue: socksPort) {
             let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host("127.0.0.1"), port: port)
             store.proxyConfigurations = [ProxyConfiguration(socksv5Proxy: endpoint)]
         }
         return store
-    }()
+    }
 
     private var dataDirectory: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

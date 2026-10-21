@@ -30,9 +30,12 @@ enum CloudflareExemptions {
 
 enum WebEngine {
 
-    static func makeConfiguration(tor: Bool) -> WKWebViewConfiguration {
+    /// `store` is the tab's own storage (see SiteSandbox). Without one, the
+    /// view gets throwaway in-memory storage, so previews and background
+    /// loads never touch anything saved.
+    static func makeConfiguration(tor: Bool, store: WKWebsiteDataStore? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = tor ? TorManager.shared.dataStore : .default()
+        config.websiteDataStore = store ?? (tor ? TorManager.shared.makeDataStore() : .nonPersistent())
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
         config.allowsInlineMediaPlayback = true
         // No autoplaying video/audio: faster pages, less data.
@@ -64,7 +67,8 @@ enum WebEngine {
 
     /// Installs every Undirect script on a (non-popup) tab's content controller.
     /// Our scripts run in an isolated content world so pages can't see or tamper with them.
-    static func installScripts(on controller: WKUserContentController, messageName: String, tor: Bool) {
+    static func installScripts(on controller: WKUserContentController, messageName: String, tor: Bool,
+                               seed: UInt32 = WebEngine.fingerprintSeed) {
         let world = WKContentWorld.defaultClient
         // Cloudflare's challenge frame checks the page for tampering, so none
         // of our scripts run inside it.
@@ -95,7 +99,7 @@ enum WebEngine {
         let fp = tor || Settings.shared.fingerprintProtection
         if webrtc || gpc || fp {
             add(shieldScript(webrtc: webrtc, gpc: gpc, fingerprint: fp, tor: tor,
-                             cfFriendly: Settings.shared.cloudflareFriendly), mainFrameOnly: false, world: .page)
+                             cfFriendly: Settings.shared.cloudflareFriendly, seed: seed), mainFrameOnly: false, world: .page)
         }
         if Settings.shared.skipVideoAds {
             add(adSkipScript, mainFrameOnly: false, world: .page)
@@ -107,11 +111,11 @@ enum WebEngine {
         add(unsavedInputScript, mainFrameOnly: true, world: world)
     }
 
-    /// Per-launch random seed for fingerprint noise: stable within a session
-    /// (so a page reading its own canvas twice gets the same answer and
-    /// doesn't break), different every launch and for every site — so the
-    /// resulting fingerprint can't link visits together.
-    private static let fingerprintSeed = UInt32.random(in: 1...UInt32.max)
+    /// Default random seed for fingerprint noise. Each tab uses its own seed,
+    /// which stays the same for the life of the tab (so a page reading its own
+    /// canvas twice gets the same answer) but differs between tabs, launches
+    /// and sites, so the fingerprint cannot link visits together.
+    static let fingerprintSeed = UInt32.random(in: 1...UInt32.max)
 
     /// Privacy shield. Where a test page scores "exposed" for any value it
     /// can read, the most effective defense is making APIs genuinely absent
@@ -119,7 +123,7 @@ enum WebEngine {
     /// values, which still count — so hardware/media APIs are removed, while
     /// canvas/WebGL/audio (which can't be removed without breaking pages) get
     /// per-site, per-launch noise that makes the fingerprint unlinkable.
-    private static func shieldScript(webrtc: Bool, gpc: Bool, fingerprint: Bool, tor: Bool, cfFriendly: Bool) -> String {
+    private static func shieldScript(webrtc: Bool, gpc: Bool, fingerprint: Bool, tor: Bool, cfFriendly: Bool, seed: UInt32) -> String {
         """
         (function () {
           var CFG = { webrtc: \(webrtc), gpc: \(gpc), fp: \(fingerprint), tor: \(tor), cf: \(cfFriendly) };
@@ -139,7 +143,7 @@ enum WebEngine {
           window.__undirectShield = true;
           var done = new WeakSet();
           var host = location.hostname || '';
-          var seed = \(fingerprintSeed) >>> 0;
+          var seed = \(seed) >>> 0;
           for (var i = 0; i < host.length; i++) { seed ^= host.charCodeAt(i); seed = Math.imul(seed, 16777619) >>> 0; }
           function mix(i) {
             var x = (seed ^ Math.imul(i + 1, 2654435761)) >>> 0;
@@ -273,6 +277,80 @@ enum WebEngine {
                 } catch (e) { return chk.apply(this, arguments); }
               };
             }
+
+            // More values a tracker can hash but a page never needs exactly.
+            // Each change is far below anything visible or measurable by a
+            // page's own logic, repeats for the same input, and differs per
+            // tab, so no hash of these values can follow you around.
+            function wob(v) {
+              var n = Math.round(Math.abs(Number(v) || 0) * 1000) | 0;
+              return ((mix(n) & 255) - 128) * 4e-7;
+            }
+            // Text widths (font fingerprinting).
+            var TMP = w.CanvasRenderingContext2D && w.CanvasRenderingContext2D.prototype;
+            if (TMP && TMP.measureText) {
+              var mt = TMP.measureText;
+              TMP.measureText = function () {
+                var m = mt.apply(this, arguments);
+                try { var wd = m.width; Object.defineProperty(m, 'width', { value: wd + wob(wd), configurable: true }); } catch (e) {}
+                return m;
+              };
+            }
+            // Element sizes (font and layout fingerprinting).
+            function jitter(r) {
+              try { r.width = r.width + wob(r.width); r.height = r.height + wob(r.height); } catch (e) {}
+              return r;
+            }
+            [w.Element, w.Range].forEach(function (K) {
+              var P = K && K.prototype;
+              if (!P) return;
+              if (P.getBoundingClientRect) {
+                var gb = P.getBoundingClientRect;
+                P.getBoundingClientRect = function () { return jitter(gb.apply(this, arguments)); };
+              }
+              if (P.getClientRects) {
+                var gc = P.getClientRects;
+                P.getClientRects = function () {
+                  var list = gc.apply(this, arguments);
+                  try { for (var i = 0; i < list.length; i++) jitter(list[i]); } catch (e) {}
+                  return list;
+                };
+              }
+            });
+            // Off-screen canvases get the same read-back noise as normal ones.
+            var OCP = w.OffscreenCanvasRenderingContext2D && w.OffscreenCanvasRenderingContext2D.prototype;
+            if (OCP && OCP.getImageData) {
+              var ogid = OCP.getImageData;
+              OCP.getImageData = function () { return noisify(ogid.apply(this, arguments)); };
+            }
+            // The order of WebGL extensions is a stable per-device signature; pages only look names up.
+            [w.WebGLRenderingContext, w.WebGL2RenderingContext].forEach(function (K) {
+              var P = K && K.prototype;
+              if (!P || !P.getSupportedExtensions) return;
+              var gs = P.getSupportedExtensions;
+              P.getSupportedExtensions = function () {
+                var list = gs.apply(this, arguments);
+                if (!list) return list;
+                list = list.slice();
+                for (var i = list.length - 1; i > 0; i--) {
+                  var j = mix(i + 7) % (i + 1), t = list[i]; list[i] = list[j]; list[j] = t;
+                }
+                return list;
+              };
+            });
+            // The size of the disk is a fingerprint; a page only needs "about this much".
+            try {
+              var SM = w.StorageManager && w.StorageManager.prototype;
+              if (SM && SM.estimate) {
+                var est = SM.estimate;
+                SM.estimate = function () {
+                  return est.apply(this, arguments).then(function (r) {
+                    try { if (r && r.quota) r.quota = Math.floor(r.quota * (0.99 + (mix(3) % 100) / 10000)); } catch (e) {}
+                    return r;
+                  });
+                };
+              }
+            } catch (e) {}
 
             // Where you came from: hide cross-site referrers from scripts.
             try {

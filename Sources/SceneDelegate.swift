@@ -13,6 +13,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         ContentBlocker.shared.rebuild()
+        SiteSandbox.migrateLegacyStoreIfNeeded()
 
         let window = UIWindow(windowScene: windowScene)
         self.window = window
