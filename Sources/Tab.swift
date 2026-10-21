@@ -723,6 +723,7 @@ extension Tab: WKNavigationDelegate {
             return
         }
         if scheme != "http" && scheme != "https" {
+            AppLog.shared.log("Cancelled a \(scheme): navigation from \(webView.url?.host ?? "a blank tab")", category: "nav")
             decisionHandler(.cancel)
             // mailto:, tel:, app links — only when the person actually tapped them.
             if action.navigationType == .linkActivated && !isTor {
@@ -777,6 +778,7 @@ extension Tab: WKNavigationDelegate {
         if Settings.shared.stripTrackers,
            (action.request.httpMethod ?? "GET").uppercased() == "GET",
            let cleaned = URLCleaner.clean(url), cleaned != url {
+            AppLog.shared.log("Cleaned a link to \(destHost) and reloaded it", category: "nav")
             decisionHandler(.cancel)
             BlockStats.shared.increment(.trackers)
             load(cleaned)
@@ -869,6 +871,7 @@ extension Tab: WKNavigationDelegate {
         }
         MediaPlayback.shared.tabDidLeavePage(self)
         if let url = webView.url, url.scheme == "http" || url.scheme == "https" { lastKnownURL = url }
+        AppLog.shared.log("Page started showing: \(isTor ? "Tor tab" : webView.url?.host ?? "unknown host")", category: "nav")
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -929,6 +932,12 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if discardingBlank { discardingBlank = false; return }
+        let finishedURL = webView.url
+        if finishedURL == nil || finishedURL?.absoluteString == "about:blank" {
+            AppLog.shared.log("A load finished with a blank address (\(isTor ? "Tor" : "normal") tab, last page \(isTor ? "hidden" : lastKnownURL?.host ?? "none"))", category: "nav")
+        } else {
+            AppLog.shared.log("Page finished: \(isTor ? "Tor tab" : finishedURL?.host ?? "unknown host")", category: "nav")
+        }
         savedTitle = nil
         endRestoring()
         CookieGuard.shared.spoofAnalyticsCookies(in: webView.configuration.websiteDataStore.httpCookieStore)
