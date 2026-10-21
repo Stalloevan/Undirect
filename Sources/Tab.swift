@@ -563,6 +563,8 @@ final class Tab: NSObject {
 
     /// Kept sites whose saved login this private tab has already been given.
     fileprivate var restoredBases = Set<String>()
+    /// The last x-safari-https: hand-off we turned back into a normal load (stops a bounce loop).
+    fileprivate var lastSafariHandoff: URL?
 
     /// Called when the tab closes: deletes its private storage (after saving
     /// what a kept site needs), or tidies a saved site store.
@@ -721,6 +723,19 @@ extension Tab: WKNavigationDelegate {
             // arbitrary paths a page tries to reach.
             decisionHandler(LocalFiles.contains(url) ? proceed : .cancel)
             return
+        }
+        // Some sites try to push the visit out to Safari with x-safari-https://...
+        // Load that address here instead, once, so the page isn't lost.
+        if scheme == "x-safari-https" || scheme == "x-safari-http",
+           var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            parts.scheme = scheme == "x-safari-https" ? "https" : "http"
+            if let target = parts.url, target != lastSafariHandoff, target != webView.url {
+                lastSafariHandoff = target
+                AppLog.shared.log("Opening a Safari hand-off here instead: \(target.host ?? "unknown host")", category: "nav")
+                decisionHandler(.cancel)
+                load(target)
+                return
+            }
         }
         if scheme != "http" && scheme != "https" {
             AppLog.shared.log("Cancelled a \(scheme): navigation from \(webView.url?.host ?? "a blank tab")", category: "nav")

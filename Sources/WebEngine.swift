@@ -30,12 +30,24 @@ enum CloudflareExemptions {
 
 enum WebEngine {
 
+    /// "Version/26.1 Safari/604.1", from the version of iOS that is running.
+    static let safariUserAgentName: String = {
+        let parts = UIDevice.current.systemVersion.split(separator: ".")
+        let version = parts.prefix(2).joined(separator: ".")
+        return "Version/\(version.isEmpty ? "17.0" : version) Safari/604.1"
+    }()
+
     /// `store` is the tab's own storage (see SiteSandbox). Without one, the
     /// view gets throwaway in-memory storage, so previews and background
     /// loads never touch anything saved.
     static func makeConfiguration(tor: Bool, store: WKWebsiteDataStore? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = store ?? (tor ? TorManager.shared.makeDataStore() : .nonPersistent())
+        // A web view's default user agent has no "Safari" part, so some sites
+        // (x.com, for one) treat it as an in-app browser and bounce the visit
+        // to Safari through an x-safari-https: link. Naming Safari, exactly as
+        // Safari itself does, makes those sites load normally.
+        config.applicationNameForUserAgent = safariUserAgentName
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
         config.allowsInlineMediaPlayback = true
         // No autoplaying video/audio: faster pages, less data.
