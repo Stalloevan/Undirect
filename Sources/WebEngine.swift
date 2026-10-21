@@ -724,7 +724,47 @@ enum WebEngine {
         }
       }
 
-      function run() { hide(true); rejectKnownCMPs(); }
+      // Banners that are not one of the known platforms (X's own, for one)
+      // still get an answer: press their "refuse / reject / necessary only"
+      // button, the same choice the known platforms get. Hiding alone would
+      // bring the banner back on every visit. Only buttons whose whole text
+      // is a refusal, inside something that talks about cookies, are pressed.
+      var REJECT = /^(refuse|reject|decline|deny)( all)?( non-?essential| optional| unnecessary)?( cookies)?$|^(accept )?(only )?(necessary|essential|required)( cookies)?( only)?$|^(allow )?(necessary|essential) cookies only$|^continue without accepting$/i;
+
+      function inCookieContext(el) {
+        var n = el;
+        for (var i = 0; i < 8 && n; i++) {
+          n = n.parentElement;
+          if (!n) return false;
+          var t = n.innerText || '';
+          if (t.length > 2500) return false;
+          if (/cookie/i.test(t)) return true;
+        }
+        return false;
+      }
+
+      function clickReject(root) {
+        try {
+          var buttons = root.querySelectorAll('button, [role="button"], a');
+          for (var i = 0; i < buttons.length; i++) {
+            var b = buttons[i];
+            if (b.__undirectRejected) continue;
+            var text = (b.innerText || b.textContent || '').trim();
+            if (!text || text.length > 60 || !REJECT.test(text)) continue;
+            if (!inCookieContext(b)) continue;
+            b.__undirectRejected = true;
+            b.click();
+            return true;
+          }
+        } catch (e) {}
+        return false;
+      }
+
+      function run() {
+        hide(true);
+        rejectKnownCMPs();
+        forEachRoot(document, clickReject);
+      }
       if (document.documentElement) run(); else document.addEventListener('DOMContentLoaded', run, { once: true });
 
       // Watch for late banners, but only react to added elements, and stop
@@ -735,7 +775,7 @@ enum WebEngine {
         var added = false;
         for (var i = 0; i < records.length; i++) { if (records[i].addedNodes.length) { added = true; break; } }
         if (!added || pending) return;
-        pending = setTimeout(function () { pending = null; hide(false); }, 300);
+        pending = setTimeout(function () { pending = null; hide(false); clickReject(document); }, 300);
       });
       function observe() {
         if (!document.documentElement) return;
