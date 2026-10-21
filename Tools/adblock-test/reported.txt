@@ -1,0 +1,4 @@
+# Real-world reports, one per line:  block|allow  <resource-type>  <url>
+#   block = this should have been blocked (an ad or tracker got through)
+#   allow = this must load (a site broke because it was blocked)
+# resource-type: document, frame, script, raw, image, ... Added with add_case.py.

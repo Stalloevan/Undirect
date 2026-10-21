@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ad-block regression test. Exit status 1 if any expectation fails."""
-import sys, random, re
+import sys, os, random, re
 from harness import *
 from corpus import *
 
@@ -76,6 +76,18 @@ off = Rules('off')
 if off.verdict('https://criteo.com/x') or off.verdict('https://s.youtube.com/x'): fail('level Off should not block built-in extras')
 if Rules('strict', user_allowed=['s.youtube.com']).verdict('https://s.youtube.com/api/stats', 'raw'): fail('allowing s.youtube.com did not lift it')
 print(f'[v3.39] {len(REQUESTED_FULL)} full, {len(REQUESTED_RESOURCE_ONLY)} resource-only, {len(REQUESTED_LEFT_ALONE)} left alone')
+
+# 6. Cases reported from real browsing (reported.txt).
+reported = 0
+for raw in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reported.txt')):
+    raw = raw.strip()
+    if not raw or raw.startswith('#'): continue
+    kind, rtype, url = raw.split(None, 2)
+    verdict = Rules('strict').verdict(url, rtype)
+    reported += 1
+    if kind == 'block' and not verdict: fail(f'reported leak still not blocked: {url} ({rtype})')
+    if kind == 'allow' and verdict: fail(f'reported breakage still blocked: {url} ({rtype}) by {verdict}')
+print(f'[reported] {reported} real-world cases')
 
 print('PASS' if not failures else f'{failures} FAILURE(S)')
 sys.exit(1 if failures else 0)

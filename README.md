@@ -22,7 +22,7 @@ Requires iOS / iPadOS 17 or later. Undirect is sideloaded — it isn't on the Ap
 - **Site exceptions:** one list (Settings › Site exceptions) for sites you trust with redirects and pop-ups, and sites where ad blocking is paused. Add from the tab's long-press menu or by hand.
 
 ### Ad, tracker and annoyance blocking
-- Domain blocklists from [HaGeZi](https://github.com/hagezi/dns-blocklists): Standard (~44k domains) or Strict (~164k), compiled into Safari-grade content-blocking rules. A small bundled extra list covers trackers HaGeZi omits, and **Settings › Custom blocklist** lets you block extra domains or allow ones a list blocks. `python3 Tools/adblock-test/run.py` checks the shipped rules against ~160 known ad/tracker and must-not-break URLs (it also runs in CI).
+- Domain blocklists from [HaGeZi](https://github.com/hagezi/dns-blocklists): Standard (~44k domains) or Strict (~164k), compiled into Safari-grade content-blocking rules. A small bundled extra list covers trackers HaGeZi omits, and **Settings › Custom blocklist** lets you block extra domains or allow ones a list blocks. `python3 Tools/adblock-test/run.py` checks the shipped rules against ~160 known ad/tracker and must-not-break URLs (it also runs in CI). Found an ad that got through or a site that broke? `python3 Tools/adblock-test/add_case.py block|allow <url>` records it as a permanent test. See also [docs/DEVICE-TESTING.md](docs/DEVICE-TESTING.md) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 - Hides common ad slots, plus a picker to hide any element on a page permanently.
 - Strips tracking parameters (`utm_*`, `fbclid`, `gclid`, and site-specific ones) from links.
 - Auto-dismisses cookie consent banners, rejecting where the site allows it.
